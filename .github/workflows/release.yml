@@ -1,0 +1,162 @@
+# Push a tag like v0.1.0 on a commit of main to publish the release packages
+# (pwk-<version>-<platform>.tar.gz and SHA256SUMS) with a build provenance
+# attestation. The tagged commit must be on main and pass the checks first.
+# Two jobs: `build` runs the checks and the Nix build (third-party build
+# scripts included) with a read-only token; `publish` holds the write and
+# signing permissions but runs no code of the repository, only attests and
+# uploads the files `build` handed over.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+# One release per tag at a time; a running release is never cancelled halfway.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    # Releases come only from the public repository; a tag pushed to a fork or a
+    # private mirror publishes nothing.
+    if: github.repository == 'XeS0r/pwk-cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    # The build runs third-party build scripts: it gets a token that can only
+    # read, so nothing it runs can change the release or sign in its name.
+    permissions:
+      contents: read
+    steps:
+      # The full history, so that main is there to compare with; the token is not
+      # kept in the git config.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The first `version = ` line of Cargo.toml is the one of [workspace.package].
+      - name: Check that the tag matches the version in Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test "v$version" = "$GITHUB_REF_NAME" || {
+            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
+            exit 1
+          }
+
+      - name: Check that the tagged commit is on main
+        run: |
+          git rev-parse --verify --quiet refs/remotes/origin/main > /dev/null || {
+            echo "origin/main was not fetched" >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || {
+            echo "tag $GITHUB_REF_NAME ($GITHUB_SHA) is not a commit on main" >&2
+            exit 1
+          }
+
+      # Until the release commit the section is headed `## [x.y.z] - Unreleased`;
+      # checks.changelog accepts that, a release does not.
+      - name: Check that the changelog section has a release date
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          # The version goes into an ERE: escape its metacharacters (the dots,
+          # a `+` of build metadata) so that they match only themselves.
+          version_re=$(printf '%s' "$version" | sed 's/[][\.*^$+?(){}|/]/\\&/g')
+          grep -qE "^## \[$version_re\] - [0-9]{4}-[0-9]{2}-[0-9]{2}\$" CHANGELOG.md || {
+            echo "CHANGELOG.md: '## [$version]' has no release date (YYYY-MM-DD)" >&2
+            exit 1
+          }
+
+      # Static builds for two platforms with their musl cross compilers.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
+      - uses: cachix/install-nix-action@v31
+
+      # Reuses what CI has built for main; saves nothing of its own.
+      - name: Restore the Nix store
+        uses: nix-community/cache-nix-action/restore@v7
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('**/*.nix', 'flake.lock', 'Cargo.lock') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+
+      # Everything `nix flake check` runs except the macOS type check (no macOS
+      # packages are released).
+      - name: Checks of the tagged commit
+        run: |
+          nix build -L --no-link \
+            .#checks.x86_64-linux.build \
+            .#checks.x86_64-linux.tests \
+            .#checks.x86_64-linux.clippy \
+            .#checks.x86_64-linux.fmt \
+            .#checks.x86_64-linux.audit \
+            .#checks.x86_64-linux.markdown \
+            .#checks.x86_64-linux.changelog \
+            .#checks.x86_64-linux.links \
+            .#checks.x86_64-linux.release
+
+      - run: nix build -L .#release
+
+      # `result` is a symlink into the Nix store; upload-artifact wants plain
+      # files. The packages and the notes go in separate places so that the
+      # notes do not end up as a release asset.
+      - name: Collect the packages and the release notes
+        run: |
+          mkdir -p "$RUNNER_TEMP/release/packages"
+          cp -L result/* "$RUNNER_TEMP/release/packages/"
+          sh packaging/release-notes.sh "${GITHUB_REF_NAME#v}" > "$RUNNER_TEMP/release/notes.md"
+          ls -l "$RUNNER_TEMP/release/packages"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    if: github.repository == 'XeS0r/pwk-cli'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # gh release create.
+      contents: write
+      # Sign the build provenance (Sigstore) and store it as an attestation.
+      id-token: write
+      attestations: write
+    # No checkout and no Nix: this job runs nothing of the repository, only
+    # GitHub's own actions and gh on the files `build` produced.
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release
+          path: ${{ runner.temp }}/release
+
+      # Catches a package that was changed or lost between the two jobs.
+      - name: Verify SHA256SUMS
+        working-directory: ${{ runner.temp }}/release/packages
+        run: sha256sum --check --strict SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            ${{ runner.temp }}/release/packages/*.tar.gz
+            ${{ runner.temp }}/release/packages/SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$RUNNER_TEMP"/release/packages/* \
+            --title "$GITHUB_REF_NAME" --notes-file "$RUNNER_TEMP/release/notes.md" \
+            --repo "$GITHUB_REPOSITORY"

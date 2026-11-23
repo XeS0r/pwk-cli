@@ -1,0 +1,31 @@
+[package]
+name = "pwk-crypto"
+description = "Passwork 7 client-side cryptography"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+aes.workspace = true
+aes-gcm.workspace = true
+base64.workspace = true
+cbc.workspace = true
+hmac.workspace = true
+md-5.workspace = true
+pbkdf2.workspace = true
+rand.workspace = true
+rsa.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

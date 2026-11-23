@@ -1,0 +1,42 @@
+{
+    "id": "691d7dc8decc3f3da50349d2",
+    "vaultId": "6821d92cb9d649035b0894e2",
+    "folderId": null,
+    "passwordEncrypted": "a3p3dWdSXVZILTlLRjA6fmQ4aCU=",
+    "keyEncrypted": null,
+    "customs": [
+        {
+            "name": "Q3VzdG9tIG5hbWU=",
+            "value": "Y3VzdG9tLWxvZ2lu",
+            "type": "dGV4dA=="
+        },
+        {
+            "name": "Q3VzdG9tIHBhc3N3b3Jk",
+            "value": "bEFOZU9sRXpKOWYyaXNsJDYwPXE=",
+            "type": "cGFzc3dvcmQ="
+        },
+        {
+            "name": "Q3VzdG9tIFRPVFA=",
+            "value": "Uk5ZR1hUUEtNTlc1M0tTQ01MQ01NWVEzWjY=",
+            "type": "dG90cA=="
+        }
+    ],
+    "attachments": [
+        {
+            "id": "691d7dc8decc3f3da50349d3",
+            "encryptedKey": "YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=",
+            "name": "test.txt"
+        }
+    ],
+    "name": "name-test",
+    "login": "login-test",
+    "url": "https://example.com",
+    "urls": ["https://example.com", "https://example.local"],
+    "description": "notes test",
+    "tags": ["test", "test-2"],
+    "fieldsOrder": null,
+    "isDeleted": false,
+    "color": 5,
+    "isFavorite": true,
+    "vaultMasterKeyEncrypted": null
+}
