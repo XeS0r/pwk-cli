@@ -319,18 +319,38 @@ impl Config {
     }
 }
 
-/// Checks and normalizes a server URL (`http(s)://…`, no trailing `/`).
+/// Checks and normalizes a server URL (`http(s)://…`, no trailing `/`). A bare host
+/// name like `passwork.example.com` gets `https://` in front; the scheme is matched
+/// without regard to case and stored in lower case.
 pub fn parse_host(value: &str) -> anyhow::Result<String> {
-    let value = value.trim().trim_end_matches('/');
-    let rest = value
-        .strip_prefix("https://")
-        .or_else(|| value.strip_prefix("http://"));
-    match rest {
-        Some(rest) if !rest.is_empty() && !rest.contains(char::is_whitespace) => {
-            Ok(value.to_owned())
-        }
-        _ => bail!("invalid host `{value}`: expected a URL like https://passwork.example.com"),
+    let trimmed = value.trim().trim_end_matches('/');
+    let invalid = || {
+        anyhow::anyhow!(
+            "invalid host `{}`: expected a URL like https://passwork.example.com",
+            trimmed.escape_debug()
+        )
+    };
+    if trimmed.chars().any(char::is_control) {
+        return Err(invalid());
     }
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
+        // Without `://` it must be a bare host[:port][/path]: a mistyped scheme like
+        // `http:/host` or `https//host` is refused instead of getting `https://` too.
+        None if trimmed.contains(":/") || trimmed.contains("//") => return Err(invalid()),
+        None => ("https", trimmed),
+    };
+    let scheme = scheme.to_ascii_lowercase();
+    if !matches!(scheme.as_str(), "https" | "http")
+        || rest.is_empty()
+        || rest.starts_with('/')
+        || rest.ends_with(':')
+        || rest.contains(['?', '#'])
+        || rest.contains(char::is_whitespace)
+    {
+        return Err(invalid());
+    }
+    Ok(format!("{scheme}://{rest}"))
 }
 
 /// The absolute, canonical path of an existing file (`config set ca_cert`), so the
@@ -452,6 +472,33 @@ mod tests {
             vars.iter()
                 .find(|(k, _)| k == name)
                 .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn hosts() {
+        let ok = |s: &str| parse_host(s).unwrap();
+        assert_eq!(ok("https://pw.example.com/"), "https://pw.example.com");
+        assert_eq!(ok("http://pw.example.com"), "http://pw.example.com");
+        assert_eq!(ok(" pw.example.com \n"), "https://pw.example.com");
+        assert_eq!(ok("pw.example.com/sub/"), "https://pw.example.com/sub");
+        assert_eq!(ok("pw.example.com:8443"), "https://pw.example.com:8443");
+        assert_eq!(ok("HTTPS://pw.example.com"), "https://pw.example.com");
+        assert_eq!(ok("Http://pw.example.com"), "http://pw.example.com");
+        for bad in [
+            "",
+            "  ",
+            "/",
+            "https://",
+            "ftp://pw.example.com",
+            "pw example.com",
+            "http:/pw.example.com",
+            "https//pw.example.com",
+            "pw.example.com?x=1",
+            "https://pw.example.com/#frag",
+            "pw.example.com\u{1b}]0;x\u{7}",
+        ] {
+            assert!(parse_host(bad).is_err(), "{bad:?}");
         }
     }
 

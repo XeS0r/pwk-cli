@@ -6,25 +6,28 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
-use pwk_api::{MemoryTokenStore, SecretString, SessionInfo, TokenStore, Tokens};
+use pwk_api::{MemoryTokenStore, SecretString, TokenStore, Tokens, UserInfo};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
 use super::Context;
 use super::client::{Api, Mode, build_client, client_config};
+use super::url_handler;
 use crate::cli::{LoginArgs, UnlockArgs};
 use crate::config::{self, parse_host};
 use crate::output::{self, Format, format_timestamp};
 use crate::prompt;
 use crate::session::{self, CredentialSource, SessionFile};
+use crate::weblogin;
 
 /// Default lifetime of an unlock.
 pub const DEFAULT_UNLOCK_TIMEOUT: Duration = Duration::from_secs(12 * 3600);
 
-/// `user name (login)`, whatever the session info provides.
+/// `Full Name (login)`, or whatever of login and email the user info provides.
 #[must_use]
-pub fn user_label(info: &SessionInfo) -> String {
-    match (info.user_name(), info.user_login()) {
+pub fn user_label(info: &UserInfo) -> String {
+    let login = info.login().or_else(|| info.email());
+    match (info.full_name(), login) {
         (Some(name), Some(login)) if name != login => format!("{name} ({login})"),
         (Some(name), _) => name.to_owned(),
         (None, Some(login)) => login.to_owned(),
@@ -44,7 +47,7 @@ pub fn parse_token_lines(text: &str) -> anyhow::Result<(String, Option<String>)>
     Ok((access.to_owned(), refresh))
 }
 
-fn read_tokens(from_stdin: bool) -> anyhow::Result<(String, Option<String>)> {
+fn read_tokens(from_stdin: bool, host: &str) -> anyhow::Result<(String, Option<String>)> {
     if from_stdin {
         let mut text = Zeroizing::new(String::new());
         std::io::stdin()
@@ -52,6 +55,10 @@ fn read_tokens(from_stdin: bool) -> anyhow::Result<(String, Option<String>)> {
             .context("cannot read the tokens from stdin")?;
         return parse_token_lines(&text);
     }
+    eprintln!(
+        "Create an API token pair under API tokens (\"Generate pair\"):\n  {}",
+        prompt::link(host)
+    );
     let access = prompt::read_hidden("Access token: ")?;
     if access.trim().is_empty() {
         bail!("no access token given");
@@ -75,17 +82,64 @@ fn prompt_host() -> anyhow::Result<String> {
 /// The command that unlocks `profile`.
 fn unlock_hint(profile: &str, is_default: bool) -> String {
     if is_default {
-        "eval \"$(pwk unlock)\"".to_owned()
+        "eval \"$(pwk auth unlock)\"".to_owned()
     } else {
-        format!("eval \"$(pwk --profile {profile} unlock)\"")
+        format!("eval \"$(pwk --profile {profile} auth unlock)\"")
     }
+}
+
+/// `login --web`: opens the desktop sign-in of the web interface, waits for the
+/// one-time token (link handler or paste) and exchanges it for a token pair.
+fn web_tokens(
+    host: &str,
+    settings: &config::ProfileConfig,
+    no_browser: bool,
+) -> anyhow::Result<Tokens> {
+    let dir = weblogin::web_login_dir(&config::state_dir(&config::process_env)?);
+    let waiting = weblogin::Waiting::start(&dir)?;
+    let url = weblogin::start_url(host);
+    let opened = !no_browser && weblogin::open_browser(&url);
+    let mut text = format!(
+        "{}\n  {}\n",
+        if opened {
+            "Sign in to Passwork in your browser:"
+        } else {
+            "Open this link and sign in to Passwork:"
+        },
+        prompt::link(&url)
+    );
+    if let Some(other) = url_handler::foreign_handler() {
+        text.push_str(&format!(
+            "Note: passwork:// links go to {other}, not pwk. Run `pwk auth handler install`\n      \
+             or paste the link here.\n"
+        ));
+    }
+    text.push_str(&format!(
+        "Then allow the passwork:// link, or paste it here. Waiting up to {} minutes…",
+        weblogin::WAIT.as_secs() / 60
+    ));
+    eprintln!("{text}");
+    let token = waiting.wait(weblogin::WAIT, true)?;
+    drop(waiting);
+    // The exchange needs no bearer; the client's store is a placeholder.
+    let placeholder = Arc::new(MemoryTokenStore::new(Tokens {
+        access_token: String::new(),
+        refresh_token: None,
+        access_expires_at: None,
+        refresh_expires_at: None,
+    }));
+    let client = build_client(client_config(host, settings)?, placeholder)?;
+    let tokens = client
+        .login_with_auth_request(&token)
+        .with_context(|| format!("cannot sign in to {host} with the token from the browser"))?;
+    Ok(tokens)
 }
 
 /// `login`: verifies the token pair against the server and stores it.
 pub fn login(ctx: &Context, args: &LoginArgs) -> anyhow::Result<ExitCode> {
     if ctx.stateless()? {
         bail!(
-            "PASSWORK_HOST and PASSWORK_TOKEN are set (stateless mode); `pwk login` is not needed"
+            "PASSWORK_HOST and PASSWORK_TOKEN are set (stateless mode); `pwk auth login` is not needed"
         );
     }
     let (path, mut config) = ctx.load_config()?;
@@ -96,20 +150,46 @@ pub fn login(ctx: &Context, args: &LoginArgs) -> anyhow::Result<ExitCode> {
         Some(host) => parse_host(host)?,
         None => prompt_host()?,
     };
-    let (access_token, refresh_token) = read_tokens(args.access_token_stdin)?;
-    let store = Arc::new(MemoryTokenStore::new(Tokens {
-        access_token,
-        refresh_token,
-        access_expires_at: None,
-        refresh_expires_at: None,
-    }));
+    let tokens = if args.web {
+        web_tokens(&host, &settings, args.no_browser)?
+    } else {
+        let (access_token, refresh_token) = read_tokens(args.access_token_stdin, &host)?;
+        Tokens {
+            access_token,
+            refresh_token,
+            access_expires_at: None,
+            refresh_expires_at: None,
+        }
+    };
+    let store = Arc::new(MemoryTokenStore::new(tokens));
     let client = build_client(
         client_config(&host, &settings)?,
         store.clone() as Arc<dyn TokenStore>,
     )?;
-    let info = client
-        .session_info()
-        .with_context(|| format!("cannot log in to {host}: the server rejected the tokens"))?;
+    client.session_info().with_context(|| {
+        if args.web {
+            format!("cannot log in to {host}: the server rejected the tokens of the web sign-in")
+        } else {
+            format!(
+                "cannot log in to {host}: the server rejected the tokens; create a new pair \
+                 under API tokens at {host}"
+            )
+        }
+    })?;
+    // The session info names no user; the label comes from the user info.
+    let user = client
+        .user_info()
+        .map_or_else(|_| "unknown user".to_owned(), |u| user_label(&u));
+    // A web sign-in takes the first passwork:// link that arrives, which any page could
+    // open; the user confirms the account before it is stored.
+    if args.web && !args.yes {
+        let question = format!("Sign in to {host} as {user}?");
+        let confirmed = prompt::confirm(&question)
+            .context("cannot ask to confirm the signed-in user without a terminal; pass --yes")?;
+        if !confirmed {
+            bail!("sign-in not confirmed; nothing was stored");
+        }
+    }
     // Unknown (error) counts as encrypted: the unlock hint is the safe advice.
     let encrypted = client.master_key_options().map_or(true, |o| o.is_some());
     // The check may have refreshed the pair.
@@ -123,15 +203,12 @@ pub fn login(ctx: &Context, args: &LoginArgs) -> anyhow::Result<ExitCode> {
     ctx.session(&profile)?
         .store(&SessionFile::new(host.clone(), tokens))?;
 
-    let mut message = format!(
-        "Logged in to {host} as {} (profile {profile}).",
-        user_label(&info)
-    );
+    let mut message = format!("Logged in to {host} as {user} (profile {profile}).");
     if encrypted {
         let hint = unlock_hint(&profile, config.is_default_profile(&profile));
-        message.push_str(&format!(" Next: {hint}"));
+        message.push_str(&format!("\nNext: {hint}"));
     } else {
-        message.push_str(" The server uses no client-side encryption; no unlock is needed.");
+        message.push_str("\nNo unlock needed: the server uses no client-side encryption.");
     }
     ctx.info(&message);
     Ok(ExitCode::SUCCESS)
@@ -257,7 +334,7 @@ pub fn status(ctx: &Context) -> anyhow::Result<ExitCode> {
         }
         if file.is_none() {
             report.locked = true;
-            report.locked_reason = Some("not logged in: run `pwk login`".to_owned());
+            report.locked_reason = Some("not logged in: run `pwk auth login`".to_owned());
             return print_status(ctx, &report);
         }
     }
@@ -283,7 +360,7 @@ pub fn status(ctx: &Context) -> anyhow::Result<ExitCode> {
 
 /// User and encryption from the server; errors are recorded, not fatal.
 fn fill_from_server(api: &Api, report: &mut Status) {
-    match api.client.session_info() {
+    match api.client.user_info() {
         Ok(info) => report.user = Some(user_label(&info)),
         Err(e) => report.user_error = Some(format!("{:#}", api.explain(e.into()))),
     }
@@ -325,7 +402,10 @@ fn print_status(ctx: &Context, report: &Status) -> anyhow::Result<ExitCode> {
         pairs.push(("user".into(), user));
         pairs.push(("state".into(), lock_state(report)));
     } else {
-        pairs.push(("session".into(), "not logged in: run `pwk login`".into()));
+        pairs.push((
+            "session".into(),
+            "not logged in: run `pwk auth login`".into(),
+        ));
     }
     if let Some(t) = report.access_expires_at {
         pairs.push(("access token expires".into(), format_timestamp(t)));
@@ -377,18 +457,21 @@ mod tests {
 
     #[test]
     fn user_labels() {
-        let info = |v: serde_json::Value| SessionInfo(v);
+        let info = |v: serde_json::Value| user_label(&UserInfo(v));
         assert_eq!(
-            user_label(&info(
-                serde_json::json!({"user": {"name": "Ann", "login": "ann"}})
-            )),
-            "Ann (ann)"
+            info(serde_json::json!({"fullName": "Ann Lee", "login": "ann"})),
+            "Ann Lee (ann)"
         );
+        // Real servers send `fullName: null`.
         assert_eq!(
-            user_label(&info(serde_json::json!({"login": "ann"}))),
+            info(serde_json::json!({"fullName": null, "login": "ann", "email": "a@x"})),
             "ann"
         );
-        assert_eq!(user_label(&info(serde_json::json!({}))), "unknown user");
+        assert_eq!(
+            info(serde_json::json!({"fullName": " ", "email": "a@x"})),
+            "a@x"
+        );
+        assert_eq!(info(serde_json::json!({})), "unknown user");
     }
 
     #[test]

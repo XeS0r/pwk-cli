@@ -41,7 +41,7 @@ pub use crate::items::MAX_ATTACHMENT_SIZE;
 pub use crate::models::{
     AttachmentRef, BatchRequest, BatchResponse, CustomField, CustomKind, Feature, Folder, Item,
     ItemFilter, ItemSummary, ItemUpdate, NewAttachment, NewItem, SessionInfo, Shortcut,
-    ShortcutSummary, ShortcutWithItem, Vault, VaultType,
+    ShortcutSummary, ShortcutWithItem, UserInfo, Vault, VaultType,
 };
 pub use crate::tokens::{MemoryTokenStore, TokenStore, Tokens};
 pub use pwk_crypto::{MasterKeyOptions, SecretBytes, SecretString};

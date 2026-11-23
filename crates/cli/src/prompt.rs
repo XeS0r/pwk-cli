@@ -14,6 +14,26 @@ pub fn read_hidden(prompt: &str) -> anyhow::Result<SecretString> {
     Ok(Zeroizing::new(value))
 }
 
+/// `url` as a clickable link (OSC 8) when stderr is a terminal, else as plain text. The
+/// visible text is the URL itself, so terminals without OSC 8 still show (and often
+/// auto-link) it.
+#[must_use]
+pub fn link(url: &str) -> String {
+    use std::io::IsTerminal as _;
+    let dumb = std::env::var_os("TERM").is_some_and(|t| t == "dumb");
+    if io::stderr().is_terminal() && !dumb {
+        osc8(url)
+    } else {
+        url.to_owned()
+    }
+}
+
+/// The OSC 8 hyperlink escape for `url`, showing the URL as text.
+#[must_use]
+fn osc8(url: &str) -> String {
+    format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
+}
+
 /// Reads one line from stdin (`--password-stdin` and friends); the trailing newline is
 /// removed. Empty input is an error.
 pub fn read_secret_stdin(what: &str) -> anyhow::Result<SecretString> {
@@ -67,6 +87,14 @@ pub fn confirm_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osc8_link() {
+        assert_eq!(
+            osc8("https://pw.example.com"),
+            "\x1b]8;;https://pw.example.com\x1b\\https://pw.example.com\x1b]8;;\x1b\\"
+        );
+    }
 
     #[test]
     fn secret_line() {

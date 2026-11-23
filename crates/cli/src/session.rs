@@ -24,7 +24,7 @@ pub const SESSION_VERSION: u32 = 1;
 pub const SESSION_AAD_PREFIX: &[u8] = b"pwk-session-v1";
 
 /// Hint appended to every "locked" message.
-pub const UNLOCK_HINT: &str = "run `eval \"$(pwk unlock)\"`";
+pub const UNLOCK_HINT: &str = "run `eval \"$(pwk auth unlock)\"`";
 
 /// Seconds since the Unix epoch.
 #[must_use]
@@ -146,13 +146,13 @@ impl Session {
         };
         let file: SessionFile = serde_json::from_str(&text).with_context(|| {
             format!(
-                "{} is damaged; run `pwk logout` and log in again",
+                "{} is damaged; run `pwk auth logout` and log in again",
                 self.file.display()
             )
         })?;
         if file.version != SESSION_VERSION {
             bail!(
-                "{} has unsupported version {}; run `pwk logout` and log in again",
+                "{} has unsupported version {}; run `pwk auth logout` and log in again",
                 self.file.display(),
                 file.version
             );
@@ -181,7 +181,7 @@ impl Session {
     ) -> anyhow::Result<T> {
         let lock = self.lock()?;
         let Some(mut session) = self.load()? else {
-            bail!("not logged in: run `pwk login`");
+            bail!("not logged in: run `pwk auth login`");
         };
         let result = change(&mut session)?;
         self.write(&session, &lock)?;
@@ -265,7 +265,7 @@ impl TokenStore for FileTokenStore {
         match self.session.load() {
             Ok(Some(file)) => Ok(file.tokens),
             Ok(None) => Err(pwk_api::Error::TokenStore(
-                "not logged in: run `pwk login`".into(),
+                "not logged in: run `pwk auth login`".into(),
             )),
             Err(e) => Err(store_error(&e)),
         }
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn locked_messages() {
-        assert!(Locked::Expired.to_string().contains("pwk unlock"));
+        assert!(Locked::Expired.to_string().contains("pwk auth unlock"));
         assert!(
             Locked::NoSessionKey {
                 var: "PWK_SESSION".into()

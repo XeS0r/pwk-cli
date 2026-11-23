@@ -36,8 +36,77 @@ fn help() {
         .stdout(predicate::str::contains(
             "Command line client for Passwork 7",
         ))
-        .stdout(predicate::str::contains("unlock"))
         .stdout(predicate::str::contains("generate-man").not());
+}
+
+/// The command tree: session commands under `auth`, attachments, one-time codes and
+/// shortcuts under `item`, profiles under `config`. The former top-level session
+/// commands and `url-handler` stay as hidden short forms.
+#[test]
+fn command_tree() {
+    let dir = tempfile::tempdir().unwrap();
+    let top = pwk(dir.path()).arg("--help").output().unwrap();
+    let top = String::from_utf8_lossy(&top.stdout).into_owned();
+    let commands: Vec<&str> = top
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|l| !l.trim().is_empty())
+        .filter_map(|l| l.split_whitespace().next())
+        .collect();
+    assert_eq!(
+        commands,
+        [
+            "auth",
+            "vault",
+            "folder",
+            "item",
+            "read",
+            "run",
+            "inject",
+            "generate",
+            "api",
+            "config",
+            "completions",
+            "help"
+        ],
+        "{top}"
+    );
+
+    for (group, subcommands) in [
+        (
+            "auth",
+            &["login", "logout", "unlock", "lock", "status", "handler"][..],
+        ),
+        ("item", &["totp", "attachment", "shortcut"][..]),
+        ("config", &["profile"][..]),
+    ] {
+        let out = pwk(dir.path()).args([group, "--help"]).output().unwrap();
+        let help = String::from_utf8_lossy(&out.stdout).into_owned();
+        for sub in subcommands {
+            assert!(
+                help.lines()
+                    .any(|l| l.trim_start().starts_with(&format!("{sub} "))),
+                "`{group} --help` lacks {sub}:\n{help}"
+            );
+        }
+    }
+
+    // Hidden short forms still parse.
+    for args in [
+        &["login", "--help"][..],
+        &["logout", "--help"][..],
+        &["unlock", "--help"][..],
+        &["lock", "--help"][..],
+        &["status", "--help"][..],
+        &["url-handler", "open", "--help"][..],
+    ] {
+        pwk(dir.path()).args(args).assert().success();
+    }
+    // Removed top-level commands are usage errors.
+    for name in ["totp", "attachment", "shortcut", "profile"] {
+        pwk(dir.path()).args([name, "--help"]).assert().code(2);
+    }
 }
 
 #[test]
@@ -214,7 +283,7 @@ fn config_set_show_unset() {
 fn profile_list_use_remove() {
     let dir = tempfile::tempdir().unwrap();
     pwk(dir.path())
-        .args(["profile", "list", "--format", "json"])
+        .args(["config", "profile", "list", "--format", "json"])
         .assert()
         .success()
         .stdout("[]\n");
@@ -224,17 +293,17 @@ fn profile_list_use_remove() {
         .assert()
         .success();
     pwk(dir.path())
-        .args(["profile", "use", "work"])
+        .args(["config", "profile", "use", "work"])
         .assert()
         .success();
     pwk(dir.path())
-        .args(["profile", "list", "--format", "table"])
+        .args(["config", "profile", "list", "--format", "table"])
         .assert()
         .success()
         .stdout("NAME  DEFAULT  HOST               SESSION\nwork  *        https://w.example  -\n");
 
     let output = pwk(dir.path())
-        .args(["profile", "list", "--format", "json"])
+        .args(["config", "profile", "list", "--format", "json"])
         .output()
         .unwrap();
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -243,15 +312,15 @@ fn profile_list_use_remove() {
     assert_eq!(json[0]["logged_in"], false);
 
     pwk(dir.path())
-        .args(["profile", "use", "bad name"])
+        .args(["config", "profile", "use", "bad name"])
         .assert()
         .code(1);
     pwk(dir.path())
-        .args(["profile", "remove", "work"])
+        .args(["config", "profile", "remove", "work"])
         .assert()
         .success();
     pwk(dir.path())
-        .args(["profile", "remove", "work"])
+        .args(["config", "profile", "remove", "work"])
         .assert()
         .code(1)
         .stderr(predicate::str::contains("no profile named work"));

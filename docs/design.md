@@ -23,13 +23,16 @@ Allowed dependency edges: `cli → api → crypto`, `cli → crypto`. Nothing el
 ```text
 pwk [--profile NAME] [--format table|json] [--quiet] <command>
 
-Session
-  login   [--host URL] [--access-token-stdin]   store host and token pair for a profile
-  logout                                         forget tokens and the session
-  unlock  [--password-stdin] [--timeout 12h] [--raw] [--shell sh|fish]
-                                                 print `export PWK_SESSION=…`
-  lock                                           forget the encrypted master key
-  status                                         profile, host, user, locked/unlocked, expiry
+Session (auth)
+  auth login   [--host URL] [--access-token-stdin | --web [--no-browser] [--yes]]
+                                         store host and token pair for a profile
+  auth logout                            forget tokens and the session
+  auth unlock  [--password-stdin] [--timeout 12h] [--raw] [--shell sh|fish]
+                                         print `export PWK_SESSION=…`
+  auth lock                              forget the encrypted master key
+  auth status                            profile, host, user, locked/unlocked, expiry
+  auth handler install | uninstall | status
+                                         route passwork:// links to `auth login --web`
 
 Objects (noun, then verb)
   vault      list | get <vault> | create <name> [--type CODE] | delete <vault>
@@ -44,22 +47,26 @@ Objects (noun, then verb)
                (one --url sets the main URL only; two or more set the main URL to the
                first and replace the URL list with all of them)
              | move <item> [--vault V] [--folder F] | delete <item>
-  attachment list <item> | get <item> <attachment> [-o PATH|-] | add <item> <file> [--name N]
-  shortcut   list [<query>] | get <shortcut> | create <item> --vault V [--folder F] | delete <shortcut>
+  item totp  <item> [--field NAME] [--vault V]   current one-time code
+  item attachment list <item> | get <item> <attachment> [-o PATH|-] | add <item> <file> [--name N]
+  item shortcut   list [<query>] | get <shortcut> | create <item> --vault V [--folder F]
+                  | delete <shortcut>
 
 Secrets in scripts
   read   pw://vault/folder…/item/field           one value on stdout
   run    [--env-file FILE]… [--no-masking] -- CMD…   resolve pw:// in env, run CMD
   inject [-i FILE] [-o FILE]                     replace {{ pw://… }} in a template
-  totp   <item> [--field NAME]                   current one-time code
   generate [--length N] [--no-symbols]           random password, nothing stored
 
 Tools
   api      METHOD PATH [--data JSON|@file|-] [--query k=v]…   raw call, JSON out
   config   show | set <key> <value> | unset <key>
-  profile  list | use <name> | remove <name>
+  config profile list | use <name> | remove <name>
   completions <bash|zsh|fish|elvish|powershell>
   generate-man <dir>   (hidden)
+
+Hidden short forms: login, logout, unlock, lock, status (= auth …) and url-handler
+(= auth handler, called by desktop entries of earlier installs).
 ```
 
 `folder move` changes the parent within the vault (`--parent`, or `--vault` alone for
@@ -153,7 +160,7 @@ $XDG_STATE_HOME/pwk/<profile>/session.json   mode 0600, directory 0700
   tried until one opens the seal, so a stale one does not hide the fresh one; a
   non-default profile never falls back to `PWK_SESSION`); a missing variable, a wrong
   key (the message names the variables tried) or a past `expires_at` means "locked: run
-  `eval "$(pwk unlock)"`".
+  `eval "$(pwk auth unlock)"`".
 - `lock` sets `unlock` to null. `logout` deletes the session file; the lock file and the
   profile directory stay, since another process may be waiting on the lock.
 - Refreshed tokens are written back under an exclusive `File::lock` on

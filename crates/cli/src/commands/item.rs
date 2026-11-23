@@ -16,9 +16,19 @@ use crate::prompt;
 
 /// `item …`.
 pub fn run(ctx: &Context, cmd: &ItemCommand) -> anyhow::Result<ExitCode> {
+    // Subcommand groups with their own entry points.
+    match cmd {
+        ItemCommand::Totp(args) => return super::secrets::totp(ctx, args),
+        ItemCommand::Attachment(cmd) => return super::attachment::run(ctx, cmd),
+        ItemCommand::Shortcut(cmd) => return super::shortcut::run(ctx, cmd),
+        _ => {}
+    }
     with_api(ctx, |api| {
         let resolver = Resolver::new(&api.client);
         match cmd {
+            ItemCommand::Totp(_) | ItemCommand::Attachment(_) | ItemCommand::Shortcut(_) => {
+                unreachable!("handled above")
+            }
             ItemCommand::List(filter) => list(ctx, &resolver, None, filter),
             ItemCommand::Search { query, filter } => list(ctx, &resolver, Some(query), filter),
             ItemCommand::Get(args) => get(ctx, &resolver, args),
@@ -79,7 +89,8 @@ fn list(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Prints item rows: NAME, LOGIN, URL, PATH, ID (or JSON).
+/// Prints item rows: NAME, LOGIN, URL, VAULT, PATH (folder below the vault), ID (or
+/// JSON).
 pub fn print_summaries(
     ctx: &Context,
     resolver: &Resolver<'_>,
@@ -88,13 +99,14 @@ pub fn print_summaries(
     if ctx.format == Format::Json {
         return output::print_json(rows);
     }
-    let mut table = Table::new(["NAME", "LOGIN", "URL", "PATH", "ID"]);
+    let mut table = Table::new(["NAME", "LOGIN", "URL", "VAULT", "PATH", "ID"]);
     for row in rows {
         table.push([
             row.name.clone(),
             row.login.clone().unwrap_or_default(),
             row.url.clone().unwrap_or_default(),
-            resolver.location(&row.vault_id, row.folder_id.as_deref())?,
+            resolver.vault_name(&row.vault_id)?,
+            resolver.folder_path(&row.vault_id, row.folder_id.as_deref())?,
             row.id.clone(),
         ]);
     }
@@ -123,8 +135,9 @@ fn get(ctx: &Context, resolver: &Resolver<'_>, args: &ItemGetArgs) -> anyhow::Re
     match ctx.format {
         Format::Json => output::print_json(item.as_ref())?,
         Format::Table => {
-            let location = resolver.location(&item.vault_id, item.folder_id.as_deref())?;
-            let pairs = item_pairs(&item, &location, args.reveal);
+            let vault = resolver.vault_name(&item.vault_id)?;
+            let path = resolver.folder_path(&item.vault_id, item.folder_id.as_deref())?;
+            let pairs = item_pairs(&item, &vault, &path, args.reveal);
             let pairs: Vec<(&str, &str)> = pairs
                 .iter()
                 .map(|(k, v)| (k.as_str(), v.as_str()))
@@ -135,17 +148,25 @@ fn get(ctx: &Context, resolver: &Resolver<'_>, args: &ItemGetArgs) -> anyhow::Re
     Ok(ExitCode::SUCCESS)
 }
 
-/// The table view of an item: standard fields, custom fields and attachments. Secrets
-/// are masked unless `reveal`.
+/// The table view of an item: standard fields, custom fields and attachments. `path`
+/// is the folder below `vault` (empty at the root). Secrets are masked unless `reveal`.
 #[must_use]
-pub fn item_pairs(item: &Item, location: &str, reveal: bool) -> Vec<(String, Zeroizing<String>)> {
+pub fn item_pairs(
+    item: &Item,
+    vault: &str,
+    path: &str,
+    reveal: bool,
+) -> Vec<(String, Zeroizing<String>)> {
     let mut pairs: Vec<(String, Zeroizing<String>)> = Vec::new();
     let mut push = |key: &str, value: &str| {
         pairs.push((key.to_owned(), Zeroizing::new(value.to_owned())));
     };
     push("id", &item.id);
     push("name", &item.name);
-    push("path", location);
+    push("vault", vault);
+    if !path.is_empty() {
+        push("path", path);
+    }
     if let Some(login) = item.login.as_deref().filter(|l| !l.is_empty()) {
         push("login", login);
     }
@@ -351,7 +372,7 @@ pub(crate) mod tests {
     #[test]
     fn pairs_mask_secrets() {
         let item = sample_item();
-        let pairs = item_pairs(&item, "V/F", false);
+        let pairs = item_pairs(&item, "V", "F/G", false);
         let get = |k: &str| {
             pairs
                 .iter()
@@ -361,9 +382,11 @@ pub(crate) mod tests {
         assert_eq!(get("password").as_deref(), Some(output::MASK));
         assert_eq!(get("PIN").as_deref(), Some(output::MASK));
         assert_eq!(get("note").as_deref(), Some("hi"));
-        assert_eq!(get("path").as_deref(), Some("V/F"));
+        assert_eq!(get("vault").as_deref(), Some("V"));
+        assert_eq!(get("path").as_deref(), Some("F/G"));
         assert_eq!(get("tags").as_deref(), Some("a, b"));
-        let revealed = item_pairs(&item, "V", true);
+        let revealed = item_pairs(&item, "V", "", true);
+        assert!(!revealed.iter().any(|(k, _)| k == "path"));
         assert!(
             revealed
                 .iter()

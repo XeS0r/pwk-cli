@@ -8,6 +8,50 @@ the configuration file and the session file may still change between minor versi
 The release workflow publishes the section of the tagged version as the release notes.
 Until a version is released its heading reads `Unreleased` instead of a date.
 
+## [0.2.0] - 2026-11-23
+
+### Added
+
+- `pwk auth login --web` signs in through the web interface instead of with an API token
+  pair: it opens the desktop sign-in in the browser and exchanges the one-time token of
+  the `passwork://login?desktopToken=…` link. `pwk auth handler install` routes that
+  link to `pwk` and passes all others on to the previous handler (Linux/XDG desktops);
+  without it the link can be pasted. Before the session is stored, `pwk` asks to confirm
+  the signed-in user (`--yes` skips that), since any page could open such a link while
+  the login waits. The endpoints are the desktop app's and not documented.
+- `pwk auth login` shows the host as a clickable link where to create an API token pair.
+
+### Changed
+
+- The commands are grouped instead of flat. Session commands are under `pwk auth`
+  (`auth login`, `auth unlock`, `auth lock`, `auth logout`, `auth status`, and the link
+  handler `auth handler`), attachments, one-time codes and shortcuts belong to items
+  (`pwk item attachment`, `pwk item totp`, `pwk item shortcut`), and profiles to the
+  configuration (`pwk config profile`). `read`, `run`, `inject` and `generate` stay at
+  the top. `pwk login`, `logout`, `unlock`, `lock` and `status` keep working as hidden
+  short forms; `pwk totp`, `attachment`, `shortcut` and `profile` are gone.
+- The JSON of `folder list` and `folder get` names the parent `parentFolderId`, as the
+  server does, instead of `parentId`.
+- `item list`, `item shortcut list` and `folder list` show the vault in its own `VAULT`
+  column; `PATH` is the folder path below the vault. `item get` shows `vault` and `path`
+  the same way.
+- A host without scheme (`passwork.example.com`) is taken as `https://`; the scheme is
+  matched without regard to case (`HTTPS://…`), and control characters are refused.
+
+### Fixed
+
+- `auth login` and `auth status` name the user instead of "unknown user": the session
+  info carries no user, so the name now comes from `GET /users/info`.
+- Folders below the first level are found: `GET /folders` lists one level per call, so
+  the tree is now read level by level (in batches). Before, items in subfolders showed
+  only their vault, and `pw://` paths into subfolders failed. Creating and moving
+  folders send the field names the server uses (`parentFolderId`, `targetVaultId`,
+  `targetFolderId`).
+- A server with client-side encryption turned off is recognised: it answers 403 on the
+  master key options, and `GET /app/settings` confirms
+  `isClientSideEncryptionEnabled: false`. `unlock` then says that no unlock is needed
+  instead of failing.
+
 ## [0.1.0] - 2026-11-23
 
 The first release: a command line client for [Passwork 7](https://passwork.pro/) in the
@@ -49,4 +93,5 @@ locally.
 - Release packages are not code-signed; check them against `SHA256SUMS` and their build
   provenance.
 
+[0.2.0]: https://github.com/XeS0r/pwk-cli/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/XeS0r/pwk-cli/releases/tag/v0.1.0

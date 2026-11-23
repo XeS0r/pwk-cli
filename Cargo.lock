@@ -1218,7 +1218,7 @@ dependencies = [
 
 [[package]]
 name = "pwk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "pwk-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64 0.22.1",
  "mockito",
@@ -1258,7 +1258,7 @@ dependencies = [
 
 [[package]]
 name = "pwk-crypto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes",
  "aes-gcm",

@@ -11,6 +11,7 @@ pub mod prompt;
 pub mod reference;
 pub mod run;
 pub mod session;
+pub mod weblogin;
 
 use std::process::ExitCode;
 

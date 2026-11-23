@@ -237,11 +237,21 @@ impl Client {
         }
     }
 
-    /// `GET users/master-key/options`. `None` means the server reports no options, which
-    /// is taken as "no client-side encryption" **(unverified: the official client never
-    /// detects this; it simply runs unencrypted when no master key is given)**.
+    /// `GET users/master-key/options`. `None` means no client-side encryption: either the
+    /// server reports no options, or it refuses the call with HTTP 403 and its app
+    /// settings say `isClientSideEncryptionEnabled: false` (seen on Passwork 7 with
+    /// encryption turned off).
     pub fn master_key_options(&self) -> Result<Option<pwk_crypto::MasterKeyOptions>> {
-        let v = self.get(endpoints::USERS_MASTER_KEY_OPTIONS, &Query::default())?;
+        let v = match self.get(endpoints::USERS_MASTER_KEY_OPTIONS, &Query::default()) {
+            Ok(v) => v,
+            Err(e @ Error::Api { status: 403, .. }) => {
+                return match self.client_side_encryption() {
+                    Ok(Some(false)) => Ok(None),
+                    _ => Err(e),
+                };
+            }
+            Err(e) => return Err(e),
+        };
         match v.get("masterKeyOptions") {
             Some(Value::String(s)) if !s.trim().is_empty() => {
                 Ok(Some(pwk_crypto::MasterKeyOptions::parse(s)?))
@@ -252,6 +262,14 @@ impl Client {
                 detail: "masterKeyOptions is not a string".into(),
             }),
         }
+    }
+
+    /// `isClientSideEncryptionEnabled` of `GET app/settings`; `None` if the server does
+    /// not say.
+    pub fn client_side_encryption(&self) -> Result<Option<bool>> {
+        let v = self.get(endpoints::APP_SETTINGS, &Query::default())?;
+        Ok(v.get("isClientSideEncryptionEnabled")
+            .and_then(Value::as_bool))
     }
 
     /// Asks the server whether client-side encryption is in use (see
@@ -445,11 +463,11 @@ impl Client {
         };
         let hash = mk_hash.or(state_hash.as_deref());
         let tokens = self.tokens.current()?;
-        match self.send_once(method, path, query, body, &tokens.access_token, hash)? {
+        match self.send_once(method, path, query, body, Some(&tokens.access_token), hash)? {
             Outcome::Done(v) => Ok(v),
             Outcome::Expired => {
                 let fresh = self.refresh_from(&tokens)?;
-                match self.send_once(method, path, query, body, &fresh.access_token, hash)? {
+                match self.send_once(method, path, query, body, Some(&fresh.access_token), hash)? {
                     Outcome::Done(v) => Ok(v),
                     Outcome::Expired => Err(Error::SessionExpired(
                         "the server rejected the refreshed access token".into(),
@@ -483,7 +501,7 @@ impl Client {
                 endpoints::SESSIONS_REFRESH,
                 &[],
                 Some(&body),
-                &old.access_token,
+                Some(&old.access_token),
                 None,
             )
             .map_err(|e| Error::SessionExpired(format!("token refresh failed: {e}")))?;
@@ -492,26 +510,26 @@ impl Client {
                 "token refresh failed: access token rejected".into(),
             ));
         };
-        let access_token = v
-            .get("accessToken")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                Error::SessionExpired("token refresh failed: no accessToken in response".into())
-            })?
-            .to_owned();
-        let refresh_token = v
-            .get("refreshToken")
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .or(Some(refresh_token));
-        Ok(Tokens {
-            access_token,
-            refresh_token,
-            access_expires_at: v.get("accessTokenExpiredAt").and_then(unix_seconds),
-            refresh_expires_at: v.get("refreshTokenExpiredAt").and_then(unix_seconds),
-        })
+        tokens_from(&v, Some(refresh_token))
+            .map_err(|detail| Error::SessionExpired(format!("token refresh failed: {detail}")))
+    }
+
+    /// Exchanges a one-time sign-in token from the web interface (the `desktopToken` of
+    /// `passwork://login?desktopToken=…`) for a token pair: `POST auth-requests/login`
+    /// without bearer. **Unverified**: the endpoint is the desktop app's, not part of
+    /// the documented API. The client's own token store is neither used nor changed.
+    pub fn login_with_auth_request(&self, token: &str) -> Result<Tokens> {
+        let path = endpoints::AUTH_REQUESTS_LOGIN;
+        let body = json!({ "token": token });
+        match self.send_once(&Method::POST, path, &[], Some(&body), None, None)? {
+            Outcome::Done(v) => tokens_from(&v, None).map_err(|detail| Error::Response {
+                path: path.into(),
+                detail,
+            }),
+            Outcome::Expired => Err(Error::SessionExpired(
+                "the server rejected the sign-in token".into(),
+            )),
+        }
     }
 
     fn send_once(
@@ -520,16 +538,18 @@ impl Client {
         path: &str,
         query: &[(String, String)],
         body: Option<&Value>,
-        bearer: &str,
+        bearer: Option<&str>,
         mk_hash: Option<&str>,
     ) -> Result<Outcome> {
         let url = format!("{}{}", self.host, path);
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert("X-Response-Format", HeaderValue::from_static("raw"));
-        let auth = HeaderValue::from_str(&format!("Bearer {bearer}"))
-            .map_err(|_| Error::Invalid("access token contains invalid characters".into()))?;
-        headers.insert(AUTHORIZATION, sensitive(auth));
+        if let Some(bearer) = bearer {
+            let auth = HeaderValue::from_str(&format!("Bearer {bearer}"))
+                .map_err(|_| Error::Invalid("access token contains invalid characters".into()))?;
+            headers.insert(AUTHORIZATION, sensitive(auth));
+        }
         if let Some(hash) = mk_hash {
             let value = HeaderValue::from_str(hash)
                 .map_err(|_| Error::Invalid("invalid master key hash".into()))?;
@@ -566,6 +586,29 @@ impl Client {
         let bytes = read_limited(resp, self.max_response_bytes)?;
         interpret(method, path, status, &bytes)
     }
+}
+
+/// The token pair of a refresh or sign-in response; `fallback_refresh` is kept when the
+/// response carries no new refresh token.
+fn tokens_from(v: &Value, fallback_refresh: Option<String>) -> std::result::Result<Tokens, String> {
+    let access_token = v
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .ok_or("no accessToken in response")?
+        .to_owned();
+    let refresh_token = v
+        .get("refreshToken")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .or(fallback_refresh);
+    Ok(Tokens {
+        access_token,
+        refresh_token,
+        access_expires_at: v.get("accessTokenExpiredAt").and_then(unix_seconds),
+        refresh_expires_at: v.get("refreshTokenExpiredAt").and_then(unix_seconds),
+    })
 }
 
 /// Reads a response body, refusing more than `limit` bytes.

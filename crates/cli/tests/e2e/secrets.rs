@@ -491,7 +491,7 @@ fn totp_prints_current_code() {
     let (env, key) = Env::unlocked();
     let out = env
         .pwk_with(&key)
-        .args(["--format", "table", "totp", "Prod DB"])
+        .args(["--format", "table", "item", "totp", "Prod DB"])
         .output()
         .unwrap();
     assert_success(&out, "totp");
@@ -505,7 +505,7 @@ fn totp_prints_current_code() {
 
     let out = env
         .pwk_with(&key)
-        .args(["totp", "Prod DB", "--field", "OTP"])
+        .args(["item", "totp", "Prod DB", "--field", "OTP"])
         .output()
         .unwrap();
     assert_success(&out, "totp --field OTP");
@@ -524,7 +524,7 @@ fn totp_without_totp_field_fails() {
     let (env, key) = Env::unlocked();
     let out = env
         .pwk_with(&key)
-        .args(["totp", "Shared Mail", "--vault", "Infra"])
+        .args(["item", "totp", "Shared Mail", "--vault", "Infra"])
         .output()
         .unwrap();
     assert_error(&out, "totp on an item without TOTP");

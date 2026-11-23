@@ -8,8 +8,8 @@ Passwork, and it is not the official `passwork-cli` that ships with Passwork's P
 package.
 
 ```sh
-pwk login --host https://passwork.example.com     # once: the API token pair
-eval "$(pwk unlock)"                              # master password, then 12 hours
+pwk auth login --host https://passwork.example.com     # once: the API token pair
+eval "$(pwk auth unlock)"                              # master password, then 12 hours
 pwk item search postgres
 pwk read "pw://Infra/Databases/Prod Postgres/password"
 DATABASE_PASSWORD="pw://Infra/Databases/Prod Postgres/password" pwk run -- ./migrate
@@ -77,15 +77,36 @@ pair"). Passwork 7 has no API for a password login, so this pair is how `pwk` si
 stores them in the profile's session file:
 
 ```sh
-pwk login --host https://passwork.example.com
+pwk auth login --host https://passwork.example.com
 ```
+
+**Or sign in through the browser** (experimental). The web interface's desktop sign-in
+ends with a `passwork://login?desktopToken=…` link, which `pwk` exchanges for a token
+pair; no API token pair is needed. The scheme is fixed by the server and normally
+belongs to the Passwork desktop app, so route it to `pwk` once (Linux/XDG desktops).
+Links that arrive while no `pwk auth login --web` waits go on to the previous handler:
+
+```sh
+pwk auth handler install      # once; `pwk auth handler uninstall` restores the old handler
+pwk auth login --web --host passwork.example.com
+```
+
+Without the handler, paste the `passwork://` link (or only the token) when asked. This
+sign-in uses the desktop app's endpoints, which Passwork does not document.
+
+The link does not say which server or which sign-in it comes from: while
+`pwk auth login --web` waits (at most five minutes), it takes the first desktop sign-in
+link, and any page could open one. So `pwk` shows the signed-in user and stores the
+session only after you confirm it (`--yes` skips the question). Do not sign the desktop
+app in to another Passwork server meanwhile: that server's one-time token would go to
+the host of `pwk auth login --web`.
 
 **3. Unlock** with your master password. `pwk` derives the master key, checks it and
 prints a session key for your shell:
 
 ```sh
-eval "$(pwk unlock)"         # sh, bash, zsh
-pwk unlock --shell fish | source
+eval "$(pwk auth unlock)"         # sh, bash, zsh
+pwk auth unlock --shell fish | source
 ```
 
 **4. Use it:**
@@ -95,7 +116,7 @@ pwk vault list
 pwk item search postgres --vault Infra
 pwk item get "Prod Postgres" --reveal
 pwk read "pw://Infra/Databases/Prod Postgres/password"
-pwk totp "GitHub admin"
+pwk item totp "GitHub admin"
 
 # Resolve pw:// references in the environment, mask them in the output
 DATABASE_PASSWORD="pw://Infra/Databases/Prod Postgres/password" pwk run -- ./migrate
@@ -105,23 +126,23 @@ pwk run --env-file .env.pwk -- docker compose up
 pwk inject -i config.yaml.tpl -o config.yaml
 ```
 
-`pwk status` shows the profile, host, user, and whether and until when the session is
-unlocked.
+`pwk auth status` shows the profile, host, user, and whether and until when the session
+is unlocked.
 
 ## Sessions
 
 `pwk` works like `bw`: the session file holds the tokens, and an unlock adds the master
 key, sealed with a key that only your shell knows.
 
-- `pwk unlock` seals the master key with a random session key and prints
+- `pwk auth unlock` seals the master key with a random session key and prints
   `export PWK_SESSION=…`. Every command that needs the master key opens the seal with
   that variable. Without it, with a wrong one, or after expiry, `pwk` says it is locked
-  and asks you to run `eval "$(pwk unlock)"`.
+  and asks you to run `eval "$(pwk auth unlock)"`.
 - An unlock lasts **12 hours** unless you pass `--timeout` (or set `session_timeout` in
   the configuration). `--raw` prints the key alone, for your own scripts.
-- `pwk lock` forgets the sealed master key; the tokens stay, so the next `pwk unlock`
-  needs only the master password. `pwk logout` deletes the session file, tokens included
-  (the lock file next to it stays).
+- `pwk auth lock` forgets the sealed master key; the tokens stay, so the next
+  `pwk auth unlock` needs only the master password. `pwk auth logout` deletes the
+  session file, tokens included (the lock file next to it stays).
 - Access tokens are refreshed automatically. The refreshed pair is written back under a
   file lock, so parallel `pwk` processes do not invalidate each other's tokens.
 
@@ -134,11 +155,11 @@ Each profile has its own host, session file and session variable. Choose one wit
 is `default`).
 
 ```sh
-pwk --profile work login --host https://passwork.work.example.com
-eval "$(pwk --profile work unlock)"     # exports PWK_SESSION_WORK
+pwk --profile work auth login --host https://passwork.work.example.com
+eval "$(pwk --profile work auth unlock)"     # exports PWK_SESSION_WORK
 pwk --profile work item list --vault Ops
-pwk profile list
-pwk profile use work                    # make it the default profile
+pwk config profile list
+pwk config profile use work                    # make it the default profile
 ```
 
 The default profile uses `PWK_SESSION`; every other profile uses
@@ -203,33 +224,39 @@ one object, `pwk` lists them with their IDs and paths; `--vault` narrows the sea
 pwk [--profile NAME] [--format table|json] [--quiet] <command>
 
 Session
-  login   [--host URL] [--access-token-stdin]   store host and token pair for a profile
-  logout                                         forget tokens and the session
-  unlock  [--password-stdin] [--timeout 12h] [--raw] [--shell sh|fish]
-                                                 print `export PWK_SESSION=…`
-  lock                                           forget the encrypted master key
-  status                                         profile, host, user, locked/unlocked, expiry
+  auth login   [--host URL] [--access-token-stdin | --web [--no-browser] [--yes]]
+                                         store host and token pair for a profile
+  auth logout                            forget tokens and the session
+  auth unlock  [--password-stdin] [--timeout 12h] [--raw] [--shell sh|fish]
+                                         print `export PWK_SESSION=…`
+  auth lock                              forget the encrypted master key
+  auth status                            profile, host, user, locked/unlocked, expiry
+  auth handler install | uninstall | status
+                                         route passwork:// links to `auth login --web`
 
 Objects
-  vault      list | get | create | delete
-  folder     list | get | create | rename | move | delete
-  item       list | search | get | create | edit | move | delete
-  attachment list | get | add
-  shortcut   list | get | create | delete
+  vault   list | get | create | delete
+  folder  list | get | create | rename | move | delete
+  item    list | search | get | create | edit | move | delete
+  item    totp <item> [--field NAME]     current one-time code
+  item    attachment list | get | add
+  item    shortcut list | get | create | delete
 
 Secrets in scripts
   read     pw://vault/folder…/item/field         one value on stdout
   run      [--env-file FILE]… [--no-masking] -- CMD…   resolve pw:// in env, run CMD
   inject   [-i FILE] [-o FILE]                   replace {{ pw://… }} in a template
-  totp     <item> [--field NAME]                 current one-time code
   generate [--length N] [--no-symbols]           random password, nothing stored
 
 Tools
   api         METHOD PATH [--data JSON|@file|-] [--query k=v]…   raw call, JSON out
   config      show | set <key> <value> | unset <key>
-  profile     list | use <name> | remove <name>
+  config      profile list | use <name> | remove <name>
   completions <bash|zsh|fish|elvish|powershell>
 ```
+
+The session commands also work without `auth` (`pwk auth unlock`, `pwk auth login`, …)
+as short forms; they are not listed in `--help`.
 
 Every command has `--help`; the install adds man pages (`man pwk`). The full command
 line, with every option of the object commands, is in

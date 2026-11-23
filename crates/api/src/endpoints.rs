@@ -13,12 +13,19 @@ pub const API_PREFIX: &str = "/api/v1";
 
 /// `POST`: refresh the token pair.
 pub const SESSIONS_REFRESH: &str = "/api/v1/sessions/refresh";
+/// `POST` without bearer: exchange a one-time desktop sign-in token (`{"token"}`) for a
+/// token pair **(unverified: taken from the desktop app, not documented)**.
+pub const AUTH_REQUESTS_LOGIN: &str = "/api/v1/auth-requests/login";
 /// `GET`: information about the current session.
 pub const SESSIONS_CURRENT_INFO: &str = "/api/v1/sessions/current/info";
+/// `GET`: the signed-in user (`login`, `fullName`, `email`, …).
+pub const USERS_INFO: &str = "/api/v1/users/info";
 /// `GET`: the user's key pair (`{"keys": {"public", "privateEncrypted"}}`).
 pub const USERS_KEYS: &str = "/api/v1/users/keys";
 /// `GET`: master key derivation options.
 pub const USERS_MASTER_KEY_OPTIONS: &str = "/api/v1/users/master-key/options";
+/// `GET`: public application settings (`isClientSideEncryptionEnabled`, …).
+pub const APP_SETTINGS: &str = "/api/v1/app/settings";
 /// `GET`: enabled application features.
 pub const APP_FEATURES: &str = "/api/v1/app/features";
 /// `GET`: all vault types.

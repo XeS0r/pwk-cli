@@ -45,8 +45,8 @@ pub fn run(ctx: &Context, cmd: &FolderCommand) -> anyhow::Result<ExitCode> {
                         ("vault".to_owned(), view.vault.clone()),
                         ("path".to_owned(), view.path.clone()),
                     ];
-                    if let Some(parent) = folder.parent_id.as_deref().filter(|p| !p.is_empty()) {
-                        pairs.push(("parentId".to_owned(), parent.to_owned()));
+                    if let Some(parent) = folder.parent() {
+                        pairs.push(("parentFolderId".to_owned(), parent.to_owned()));
                     }
                     pairs.extend(scalar_extras(&folder.extra));
                     output::write_stdout(&output::render_pairs(&pairs))?;
@@ -138,11 +138,12 @@ fn list(
         output::print_json(&views)?;
         return Ok(ExitCode::SUCCESS);
     }
-    let mut table = Table::new(["NAME", "PATH", "ID"]);
+    let mut table = Table::new(["NAME", "VAULT", "PATH", "ID"]);
     for v in &views {
         table.push([
             v.folder.name.clone(),
-            format!("{}/{}", v.vault, v.path),
+            v.vault.clone(),
+            v.path.clone(),
             v.folder.id.clone(),
         ]);
     }
@@ -160,7 +161,7 @@ fn is_within(tree: &FolderTree, start: &str, ancestor: &str) -> bool {
             Some(id) => {
                 current = tree
                     .get(id)
-                    .and_then(|f| f.parent_id.as_deref())
+                    .and_then(|f| f.parent())
                     .filter(|p| !p.is_empty());
             }
             None => return false,

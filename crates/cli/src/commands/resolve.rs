@@ -71,7 +71,7 @@ pub struct FolderTree {
 
 /// A parent ID that means "vault root": missing, empty or not a folder of this vault.
 fn parent_of<'a>(tree: &'a FolderTree, folder: &'a Folder) -> Option<&'a Folder> {
-    let parent = folder.parent_id.as_deref().filter(|p| !p.is_empty())?;
+    let parent = folder.parent()?;
     tree.get(parent)
 }
 
@@ -282,7 +282,7 @@ impl<'c> Resolver<'c> {
         }
         let folders = self
             .client
-            .list_folders(Some(vault_id), None)
+            .list_all_folders(vault_id)
             .context("cannot list folders")?
             .into_iter()
             .filter(|f| f.vault_id.is_empty() || f.vault_id == vault_id)
@@ -292,6 +292,11 @@ impl<'c> Resolver<'c> {
             .borrow_mut()
             .insert(vault_id.to_owned(), tree.clone());
         Ok(tree)
+    }
+
+    /// `Folder/Sub` of a folder below its vault; empty at the vault root.
+    pub fn folder_path(&self, vault_id: &str, folder_id: Option<&str>) -> anyhow::Result<String> {
+        Ok(self.tree(vault_id)?.path_of(folder_id))
     }
 
     /// `Vault/Folder/Sub` of a location.

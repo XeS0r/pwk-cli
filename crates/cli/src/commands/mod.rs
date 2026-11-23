@@ -11,6 +11,7 @@ pub mod raw_api;
 pub mod resolve;
 pub mod secrets;
 pub mod shortcut;
+pub mod url_handler;
 pub mod vault;
 
 use std::path::PathBuf;
@@ -20,7 +21,8 @@ use anyhow::{Context as _, bail};
 use clap::CommandFactory as _;
 
 use crate::cli::{
-    Cli, Command, CompletionsArgs, ConfigCommand, GenerateArgs, GenerateManArgs, ProfileCommand,
+    AuthCommand, Cli, Command, CompletionsArgs, ConfigCommand, GenerateArgs, GenerateManArgs,
+    ProfileCommand,
 };
 use crate::config::{self, Config};
 use crate::output::{self, Format, Table};
@@ -92,6 +94,7 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         profile_arg: cli.profile.clone(),
     };
     match &cli.command {
+        Command::Auth(cmd) => auth_cmd(&ctx, cmd),
         Command::Login(args) => auth::login(&ctx, args),
         Command::Logout => logout(&ctx),
         Command::Unlock(args) => auth::unlock(&ctx, args),
@@ -100,18 +103,27 @@ pub fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Vault(cmd) => vault::run(&ctx, cmd),
         Command::Folder(cmd) => folder::run(&ctx, cmd),
         Command::Item(cmd) => item::run(&ctx, cmd),
-        Command::Attachment(cmd) => attachment::run(&ctx, cmd),
-        Command::Shortcut(cmd) => shortcut::run(&ctx, cmd),
         Command::Read(args) => secrets::read(&ctx, args),
         Command::Run(args) => secrets::run(&ctx, args),
         Command::Inject(args) => secrets::inject(&ctx, args),
-        Command::Totp(args) => secrets::totp(&ctx, args),
         Command::Generate(args) => generate(&ctx, args),
         Command::Api(args) => raw_api::run(&ctx, args),
         Command::Config(cmd) => config_cmd(&ctx, cmd),
-        Command::Profile(cmd) => profile(&ctx, cmd),
+        Command::UrlHandler(cmd) => url_handler::run(&ctx, cmd),
         Command::Completions(args) => completions(args),
         Command::GenerateMan(args) => generate_man(args),
+    }
+}
+
+/// `auth …`.
+fn auth_cmd(ctx: &Context, cmd: &AuthCommand) -> anyhow::Result<ExitCode> {
+    match cmd {
+        AuthCommand::Login(args) => auth::login(ctx, args),
+        AuthCommand::Logout => logout(ctx),
+        AuthCommand::Unlock(args) => auth::unlock(ctx, args),
+        AuthCommand::Lock => lock(ctx),
+        AuthCommand::Status => auth::status(ctx),
+        AuthCommand::Handler(cmd) => url_handler::run(ctx, cmd),
     }
 }
 
@@ -171,10 +183,14 @@ pub fn generate(_ctx: &Context, args: &GenerateArgs) -> anyhow::Result<ExitCode>
 // ---------------------------------------------------------------------------------------
 // Tools
 
-/// `config show|set|unset`.
+/// `config show|set|unset|profile`.
 pub fn config_cmd(ctx: &Context, cmd: &ConfigCommand) -> anyhow::Result<ExitCode> {
+    if let ConfigCommand::Profile(cmd) = cmd {
+        return profile(ctx, cmd);
+    }
     let (path, mut config) = ctx.load_config()?;
     match cmd {
+        ConfigCommand::Profile(_) => unreachable!("handled above"),
         ConfigCommand::Show => match ctx.format {
             Format::Json => output::print_json(&config)?,
             Format::Table => {

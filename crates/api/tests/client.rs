@@ -201,12 +201,13 @@ fn call_normalises_path() {
     }
     m.assert();
     let _m2 = server
-        .mock("GET", "/api/v1/sessions/current/info")
-        .with_body(r#"{"user":{"name":"Jane","login":"jane"}}"#)
+        .mock("GET", "/api/v1/users/info")
+        .with_body(r#"{"fullName":null,"login":"jane","email":"jane@example.com"}"#)
         .create();
-    let info = c.session_info().unwrap();
-    assert_eq!(info.user_name(), Some("Jane"));
-    assert_eq!(info.user_login(), Some("jane"));
+    let info = c.user_info().unwrap();
+    assert_eq!(info.full_name(), None);
+    assert_eq!(info.login(), Some("jane"));
+    assert_eq!(info.email(), Some("jane@example.com"));
 }
 
 #[test]
@@ -1494,7 +1495,7 @@ fn folder_move_world(server: &mut ServerGuard, v2_encrypts: bool) -> Vec<mockito
     vec![
         server
             .mock("GET", "/api/v1/folders/f1")
-            .with_body(r#"{"id":"f1","name":"F","vaultId":"v1","parentId":null}"#)
+            .with_body(r#"{"id":"f1","name":"F","vaultId":"v1","parentFolderId":null}"#)
             .create(),
         server
             .mock("GET", "/api/v1/vaults/v1")
@@ -1532,9 +1533,88 @@ fn move_folder_within_vault_is_sent() {
     let _world = folder_move_world(&mut server, true);
     let mv = server
         .mock("POST", "/api/v1/folders/f1/move")
-        .match_body(Matcher::Json(json!({"vaultId": "v1", "parentId": "p"})))
+        .match_body(Matcher::Json(
+            json!({"targetVaultId": "v1", "targetFolderId": "p"}),
+        ))
         .with_body("{}")
         .create();
     client(&server).move_folder("f1", "v1", Some("p")).unwrap();
     mv.assert();
+}
+
+/// 403 on the master key options means "no encryption" only if the app settings say so.
+#[test]
+fn master_key_options_403() {
+    let mut server = Server::new();
+    let options = server
+        .mock("GET", "/api/v1/users/master-key/options")
+        .with_status(403)
+        .with_body(r#"{"errors":[{"code":"forbidden","message":"Clientseitige Verschlüsselung deaktiviert"}]}"#)
+        .expect(3)
+        .create();
+    let disabled = server
+        .mock("GET", "/api/v1/app/settings")
+        .with_body(r#"{"isClientSideEncryptionEnabled":false}"#)
+        .create();
+    let c = client(&server);
+    assert!(c.master_key_options().unwrap().is_none());
+    assert!(!c.detect_encryption().unwrap());
+    assert!(c.is_plain());
+    disabled.remove();
+
+    let _enabled = server
+        .mock("GET", "/api/v1/app/settings")
+        .with_body(r#"{"isClientSideEncryptionEnabled":true}"#)
+        .create();
+    let err = client(&server).master_key_options().unwrap_err();
+    assert!(
+        matches!(err, pwk_api::Error::Api { status: 403, .. }),
+        "{err:?}"
+    );
+    options.assert();
+}
+
+/// The folder tree is read level by level; a sub-request without a success status is an
+/// error, not an empty or garbled level.
+#[test]
+fn list_all_folders_levels_and_failures() {
+    let mut server = Server::new();
+    let _root = server
+        .mock("GET", "/api/v1/folders")
+        .match_query(Matcher::UrlEncoded("vaultId".into(), "v".into()))
+        .with_body(r#"{"items":[{"id":"f1","name":"A","vaultId":"v","parentFolderId":null}]}"#)
+        .create();
+    let level = server
+        .mock("POST", "/api/v1/batch")
+        .with_body(
+            json!({"responses": [{"statusCode": 200, "body": {"items": [
+                {"id": "f2", "name": "B", "vaultId": "v", "parentFolderId": "f1"}
+            ]}}]})
+            .to_string(),
+        )
+        .expect(1)
+        .create();
+    let _empty = server
+        .mock("POST", "/api/v1/batch")
+        .match_body(Matcher::Regex("parentFolderId=f2".into()))
+        .with_body(json!({"responses": [{"statusCode": 200, "body": {"items": []}}]}).to_string())
+        .create();
+    let folders = client(&server).list_all_folders("v").unwrap();
+    let ids: Vec<&str> = folders.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids, ["f1", "f2"]);
+    assert_eq!(folders[1].parent(), Some("f1"));
+    level.assert();
+
+    let mut server = Server::new();
+    let _root = server
+        .mock("GET", "/api/v1/folders")
+        .match_query(Matcher::Any)
+        .with_body(r#"{"items":[{"id":"f1","name":"A","vaultId":"v"}]}"#)
+        .create();
+    let _broken = server
+        .mock("POST", "/api/v1/batch")
+        .with_body(json!({"responses": [{"body": {"items": []}}]}).to_string())
+        .create();
+    let err = client(&server).list_all_folders("v").unwrap_err();
+    assert!(err.to_string().contains("HTTP 0"), "{err}");
 }

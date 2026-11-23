@@ -519,6 +519,33 @@ fn vault_list_shows_vaults() {
     assert!(table.contains("Infra") && table.contains("Team"), "{table}");
 }
 
+/// `item list` shows the vault in its own column and the folder path below it, also
+/// for a folder two levels deep (the server lists one level per call).
+#[test]
+fn item_list_shows_vault_and_folder_path() {
+    let (env, key) = Env::unlocked();
+    let out = run_ok(
+        &env,
+        &key,
+        &["--format", "table", "item", "list", "--vault", "Infra"],
+    );
+    let table = stdout(&out);
+    let header = table.lines().next().unwrap_or_default();
+    let columns: Vec<&str> = header.split_whitespace().collect();
+    assert_eq!(
+        columns,
+        ["NAME", "LOGIN", "URL", "VAULT", "PATH", "ID"],
+        "{table}"
+    );
+    let row = table
+        .lines()
+        .find(|l| l.starts_with("Prod DB"))
+        .unwrap_or_else(|| panic!("no Prod DB row in:\n{table}"));
+    assert!(row.contains("Infra"), "{row}");
+    assert!(row.contains("Datenbanken/Prod"), "{row}");
+    assert!(!row.contains("Infra/Datenbanken"), "vault in PATH: {row}");
+}
+
 /// Scenario 7: folder list shows nested folders with their paths.
 #[test]
 fn folder_list_shows_paths() {
@@ -581,14 +608,14 @@ fn folder_create_sends_body() {
     let body = single_body(&env, "POST", "/api/v1/folders");
     assert_eq!(body["name"], "Neu");
     assert_eq!(body["vaultId"], VAULT_INFRA);
-    assert_eq!(body["parentId"], FOLDER_DB);
+    assert_eq!(body["parentFolderId"], FOLDER_DB);
 
     run_ok(&env, &key, &["folder", "create", "Top", "--vault", "Team"]);
     let reqs = env.server.requests_to("POST", "/api/v1/folders");
     let top = reqs[1].json();
     assert_eq!(top["name"], "Top");
     assert_eq!(top["vaultId"], VAULT_TEAM);
-    assert!(top["parentId"].is_null(), "root folder: {top:#}");
+    assert!(top.get("parentFolderId").is_none(), "root folder: {top:#}");
 }
 
 /// Moving a folder within its vault sends the new parent (`null` = vault root).
@@ -597,8 +624,11 @@ fn folder_move_within_vault_sends_body() {
     let (env, key) = Env::unlocked();
     run_ok(&env, &key, &["folder", "move", "Prod", "--vault", "Infra"]);
     let body = single_body(&env, "POST", &format!("/api/v1/folders/{FOLDER_PROD}/move"));
-    assert_eq!(body["vaultId"], VAULT_INFRA);
-    assert!(body["parentId"].is_null(), "vault root expected: {body:#}");
+    assert_eq!(body["targetVaultId"], VAULT_INFRA);
+    assert!(
+        body.get("targetFolderId").is_none(),
+        "vault root: no targetFolderId expected: {body:#}"
+    );
 }
 
 /// A folder cannot be moved below one of its own descendants (that would be a cycle).
@@ -674,10 +704,11 @@ fn api_query_and_data_are_sent() {
             &format!("vaultId={VAULT_INFRA}"),
         ],
     );
+    // One level per call, as on a real server: Infra's root holds one folder.
     let v = stdout_json(&out);
-    assert_eq!(v["items"].as_array().map(Vec::len), Some(2), "{v:#}");
+    assert_eq!(v["items"].as_array().map(Vec::len), Some(1), "{v:#}");
 
-    let data = json!({ "name": "ViaApi", "vaultId": VAULT_TEAM, "parentId": null });
+    let data = json!({ "name": "ViaApi", "vaultId": VAULT_TEAM, "parentFolderId": null });
     let out = run_ok(
         &env,
         &key,
@@ -697,7 +728,7 @@ fn api_query_and_data_are_sent() {
 #[test]
 fn api_query_in_path_is_sent() {
     let (env, key) = Env::unlocked();
-    for (vault, count) in [(VAULT_INFRA, 2), (VAULT_TEAM, 0)] {
+    for (vault, count) in [(VAULT_INFRA, 1), (VAULT_TEAM, 0)] {
         let out = run_ok(
             &env,
             &key,
@@ -720,7 +751,15 @@ fn attachment_get_writes_original_content() {
     run_ok(
         &env,
         &key,
-        &["attachment", "get", "Prod DB", DUMP_NAME, "-o", target_s],
+        &[
+            "item",
+            "attachment",
+            "get",
+            "Prod DB",
+            DUMP_NAME,
+            "-o",
+            target_s,
+        ],
     );
     assert_eq!(std::fs::read(&target).unwrap(), dump_content());
     #[cfg(unix)]
@@ -733,7 +772,7 @@ fn attachment_get_writes_original_content() {
     let out = run_ok(
         &env,
         &key,
-        &["attachment", "get", "Prod DB", ATT_DUMP, "-o", "-"],
+        &["item", "attachment", "get", "Prod DB", ATT_DUMP, "-o", "-"],
     );
     assert_eq!(out.stdout, dump_content());
 }
@@ -742,7 +781,7 @@ fn attachment_get_writes_original_content() {
 #[test]
 fn attachment_list_shows_names() {
     let (env, key) = Env::unlocked();
-    let out = run_ok(&env, &key, &["attachment", "list", "Prod DB"]);
+    let out = run_ok(&env, &key, &["item", "attachment", "list", "Prod DB"]);
     let list = stdout_json(&out);
     for v in [DUMP_NAME, BROKEN_NAME, ATT_DUMP, ATT_BROKEN] {
         assert!(json_contains_str(&list, v), "{v} missing in {list:#}");
@@ -758,6 +797,7 @@ fn attachment_get_hash_mismatch_fails() {
         &env,
         &key,
         &[
+            "item",
             "attachment",
             "get",
             "Prod DB",

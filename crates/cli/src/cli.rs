@@ -47,7 +47,67 @@ impl Cli {
 /// Commands.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    // Session
+    /// Log in, unlock and manage the session.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+
+    // Objects
+    /// Manage vaults.
+    #[command(subcommand)]
+    Vault(VaultCommand),
+    /// Manage folders.
+    #[command(subcommand)]
+    Folder(FolderCommand),
+    /// Manage items (passwords), their attachments, one-time codes and shortcuts.
+    #[command(subcommand)]
+    Item(ItemCommand),
+
+    // Secrets in scripts
+    /// Print one secret value given by a pw:// reference.
+    Read(ReadArgs),
+    /// Run a command with pw:// references in its environment resolved.
+    Run(RunArgs),
+    /// Replace {{ pw://… }} placeholders in a template.
+    Inject(InjectArgs),
+    /// Print a random password (nothing is stored).
+    Generate(GenerateArgs),
+
+    // Tools
+    /// Send a raw API request and print the JSON response.
+    Api(ApiArgs),
+    /// Show and change the configuration and the profiles.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+    /// Print a shell completion script.
+    Completions(CompletionsArgs),
+    /// Write man pages for pwk and its subcommands into a directory.
+    #[command(hide = true)]
+    GenerateMan(GenerateManArgs),
+
+    // Hidden short forms of the session commands (`pwk unlock` = `pwk auth unlock`).
+    /// Short form of `auth login`.
+    #[command(hide = true)]
+    Login(LoginArgs),
+    /// Short form of `auth logout`.
+    #[command(hide = true)]
+    Logout,
+    /// Short form of `auth unlock`.
+    #[command(hide = true)]
+    Unlock(UnlockArgs),
+    /// Short form of `auth lock`.
+    #[command(hide = true)]
+    Lock,
+    /// Short form of `auth status`.
+    #[command(hide = true)]
+    Status,
+    /// Former name of `auth handler`; desktop entries of earlier installs call it.
+    #[command(subcommand, hide = true)]
+    UrlHandler(UrlHandlerCommand),
+}
+
+/// `auth` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
     /// Store the host and a token pair for a profile.
     Login(LoginArgs),
     /// Forget the tokens and the session of a profile.
@@ -58,50 +118,9 @@ pub enum Command {
     Lock,
     /// Show profile, host, user and whether the session is unlocked.
     Status,
-
-    // Objects
-    /// Manage vaults.
+    /// Route passwork:// sign-in links to `pwk auth login --web` (Linux/XDG desktops).
     #[command(subcommand)]
-    Vault(VaultCommand),
-    /// Manage folders.
-    #[command(subcommand)]
-    Folder(FolderCommand),
-    /// Manage items (passwords).
-    #[command(subcommand)]
-    Item(ItemCommand),
-    /// Manage the attachments of an item.
-    #[command(subcommand)]
-    Attachment(AttachmentCommand),
-    /// Manage shortcuts to items in other vaults.
-    #[command(subcommand)]
-    Shortcut(ShortcutCommand),
-
-    // Secrets in scripts
-    /// Print one secret value given by a pw:// reference.
-    Read(ReadArgs),
-    /// Run a command with pw:// references in its environment resolved.
-    Run(RunArgs),
-    /// Replace {{ pw://… }} placeholders in a template.
-    Inject(InjectArgs),
-    /// Print the current one-time code of an item.
-    Totp(TotpArgs),
-    /// Print a random password (nothing is stored).
-    Generate(GenerateArgs),
-
-    // Tools
-    /// Send a raw API request and print the JSON response.
-    Api(ApiArgs),
-    /// Show and change the configuration.
-    #[command(subcommand)]
-    Config(ConfigCommand),
-    /// List, select and remove profiles.
-    #[command(subcommand)]
-    Profile(ProfileCommand),
-    /// Print a shell completion script.
-    Completions(CompletionsArgs),
-    /// Write man pages for pwk and its subcommands into a directory.
-    #[command(hide = true)]
-    GenerateMan(GenerateManArgs),
+    Handler(UrlHandlerCommand),
 }
 
 // ---------------------------------------------------------------------------------------
@@ -115,8 +134,19 @@ pub struct LoginArgs {
     pub host: Option<String>,
     /// Read the access token (first line) and the refresh token (second line, optional)
     /// from stdin instead of asking for them.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "web")]
     pub access_token_stdin: bool,
+    /// Sign in through the web interface instead of with an API token pair. The browser
+    /// hands the sign-in back via `pwk auth handler install`, or paste the
+    /// passwork://login?desktopToken=… link.
+    #[arg(long)]
+    pub web: bool,
+    /// With --web: print the sign-in link instead of opening the browser.
+    #[arg(long, requires = "web")]
+    pub no_browser: bool,
+    /// With --web: store the session without asking to confirm the signed-in user.
+    #[arg(short = 'y', long, requires = "web")]
+    pub yes: bool,
 }
 
 /// Arguments of `unlock`.
@@ -257,6 +287,14 @@ pub enum ItemCommand {
         /// Item name or ID.
         item: String,
     },
+    /// Print the current one-time code of an item.
+    Totp(TotpArgs),
+    /// Manage the attachments of an item.
+    #[command(subcommand)]
+    Attachment(AttachmentCommand),
+    /// Manage shortcuts to items in other vaults.
+    #[command(subcommand)]
+    Shortcut(ShortcutCommand),
 }
 
 /// Filters of `item list` and `item search`.
@@ -700,6 +738,26 @@ fn parse_key_value(text: &str) -> Result<(String, String), String> {
     }
 }
 
+/// `auth handler` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum UrlHandlerCommand {
+    /// Make pwk the passwork:// handler; other links go on to the previous handler.
+    Install,
+    /// Restore the previous passwork:// handler.
+    Uninstall,
+    /// Show which program handles passwork:// links.
+    Status,
+    /// Handle one link (the command of pwk's desktop entry).
+    #[command(hide = true)]
+    Open {
+        /// The passwork:// link.
+        url: String,
+        /// State directory of the waiting `login --web` (fixed at install time).
+        #[arg(long, value_name = "DIR")]
+        state_dir: Option<PathBuf>,
+    },
+}
+
 /// `config` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum ConfigCommand {
@@ -718,6 +776,9 @@ pub enum ConfigCommand {
         /// Key.
         key: String,
     },
+    /// List, select and remove profiles.
+    #[command(subcommand)]
+    Profile(ProfileCommand),
 }
 
 /// `profile` subcommands.

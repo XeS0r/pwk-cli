@@ -81,12 +81,29 @@ pub struct Folder {
     /// Vault ID.
     #[serde(default, deserialize_with = "null_default")]
     pub vault_id: String,
-    /// Parent folder ID; `None` at the vault root.
-    #[serde(default)]
+    /// Parent folder ID as the server sends it (`parentFolderId`); `None` at the vault
+    /// root. Read it with [`Folder::parent`], which also accepts `parentId`.
+    #[serde(default, rename = "parentFolderId")]
     pub parent_id: Option<String>,
-    /// All other fields.
+    /// All other fields (an older `parentId` among them).
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+impl Folder {
+    /// The parent folder ID: `parentFolderId`, else `parentId`; `None` at the root.
+    #[must_use]
+    pub fn parent(&self) -> Option<&str> {
+        self.parent_id
+            .as_deref()
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                self.extra
+                    .get("parentId")
+                    .and_then(Value::as_str)
+                    .filter(|p| !p.is_empty())
+            })
+    }
 }
 
 /// A row of an item search or list (no secrets).
@@ -448,30 +465,42 @@ pub struct Feature {
     pub extra: Map<String, Value>,
 }
 
-/// `GET /sessions/current/info`, kept as JSON.
+/// `GET /sessions/current/info`, kept as JSON. It describes the session (method,
+/// expiry, 2FA state), not the user; see [`UserInfo`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SessionInfo(pub Value);
 
-impl SessionInfo {
-    fn user_field(&self, key: &str) -> Option<&str> {
+/// `GET /users/info`, kept as JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct UserInfo(pub Value);
+
+impl UserInfo {
+    fn text(&self, key: &str) -> Option<&str> {
         self.0
-            .get("user")
-            .and_then(|u| u.get(key))
-            .or_else(|| self.0.get(key))
+            .get(key)
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     }
 
-    /// The user's display name, if present (`user.name` or `name`).
+    /// The display name (`fullName`), if set.
     #[must_use]
-    pub fn user_name(&self) -> Option<&str> {
-        self.user_field("name")
+    pub fn full_name(&self) -> Option<&str> {
+        self.text("fullName")
     }
 
-    /// The user's login, if present (`user.login` or `login`).
+    /// The login name.
     #[must_use]
-    pub fn user_login(&self) -> Option<&str> {
-        self.user_field("login")
+    pub fn login(&self) -> Option<&str> {
+        self.text("login")
+    }
+
+    /// The email address.
+    #[must_use]
+    pub fn email(&self) -> Option<&str> {
+        self.text("email")
     }
 }
 
@@ -637,6 +666,17 @@ impl BatchResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_parent_keys() {
+        let parse = |v: Value| serde_json::from_value::<Folder>(v).unwrap();
+        let both = parse(serde_json::json!({"id": "f2", "parentFolderId": "f1", "parentId": "f1"}));
+        assert_eq!(both.parent(), Some("f1"));
+        let old = parse(serde_json::json!({"id": "f2", "parentId": "f0"}));
+        assert_eq!(old.parent(), Some("f0"));
+        let root = parse(serde_json::json!({"id": "f1", "parentFolderId": null}));
+        assert_eq!(root.parent(), None);
+    }
 
     #[test]
     fn default_item_is_plain() {

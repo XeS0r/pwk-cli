@@ -505,7 +505,11 @@ fn colliding_profile_names_are_refused() {
     assert!(err.contains("PWK_SESSION_A_B"), "{err}");
     assert!(!env.session_path("a_b").exists());
 
-    let out = env.pwk().args(["profile", "use", "A-B"]).output().unwrap();
+    let out = env
+        .pwk()
+        .args(["config", "profile", "use", "A-B"])
+        .output()
+        .unwrap();
     assert_error(&out, "profile use A-B");
     let out = env
         .pwk()
@@ -514,7 +518,11 @@ fn colliding_profile_names_are_refused() {
         .unwrap();
     assert_error(&out, "config set profiles.A_b.host");
     // The profile itself is fine.
-    let out = env.pwk().args(["profile", "use", "a-b"]).output().unwrap();
+    let out = env
+        .pwk()
+        .args(["config", "profile", "use", "a-b"])
+        .output()
+        .unwrap();
     assert_success(&out, "profile use a-b");
 }
 
@@ -589,4 +597,167 @@ fn unlock_refuses_weak_key_derivation() {
     );
     assert!(stdout(&out).trim().is_empty(), "printed a key anyway");
     assert!(env.session_json("default")["unlock"].is_null());
+}
+
+// ---------------------------------------------------------------------------------------
+// login --web
+
+/// `pwk login --web --no-browser` with the passwork:// link pasted on stdin.
+#[test]
+fn web_login_with_pasted_link() {
+    let env = Env::new();
+    let out = env
+        .pwk()
+        .args([
+            "login",
+            "--web",
+            "--no-browser",
+            "--yes",
+            "--host",
+            &env.server.url,
+        ])
+        .write_stdin(format!(
+            "not a link\npasswork://login?desktopToken={DESKTOP_TOKEN}\n"
+        ))
+        .output()
+        .unwrap();
+    assert_success(&out, "login --web");
+    let err = stderr(&out);
+    assert!(err.contains("/desktop?startDesktop=1"), "{err}");
+    assert!(err.contains("Logged in to"), "{err}");
+    let session = env.session_json("default");
+    assert_eq!(session["access_token"], ACCESS_TOKEN, "{session}");
+    assert_eq!(session["refresh_token"], REFRESH_TOKEN, "{session}");
+    assert!(
+        !env.state_home().join("pwk/web-login/pending.json").exists(),
+        "marker left behind"
+    );
+}
+
+/// The link handler hands the token to a waiting `login --web`.
+#[test]
+fn web_login_through_link_handler() {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let env = Env::new();
+    let mut login = Command::new(env!("CARGO_BIN_EXE_pwk"))
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("HOME", env.home())
+        .env("XDG_CONFIG_HOME", env.config_home())
+        .env("XDG_STATE_HOME", env.state_home())
+        .args([
+            "login",
+            "--web",
+            "--no-browser",
+            "--yes",
+            "--host",
+            &env.server.url,
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let marker = env.state_home().join("pwk/web-login/pending.json");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline, "no marker");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let out = env
+        .pwk()
+        .args([
+            "auth",
+            "handler",
+            "open",
+            &format!("passwork://login?desktopToken={DESKTOP_TOKEN}"),
+        ])
+        .output()
+        .unwrap();
+    assert_success(&out, "url-handler open");
+    // Keep stdin open until the handler delivered, then let the login finish.
+    login.stdin.take().unwrap().flush().unwrap();
+    let out = login.wait_with_output().unwrap();
+    assert_success(&out, "login --web");
+    assert_eq!(env.session_json("default")["access_token"], ACCESS_TOKEN);
+    assert!(!marker.exists(), "marker left behind");
+}
+
+#[test]
+fn web_login_rejected_token() {
+    let env = Env::new();
+    let out = env
+        .pwk()
+        .args([
+            "login",
+            "--web",
+            "--no-browser",
+            "--yes",
+            "--host",
+            &env.server.url,
+        ])
+        .write_stdin("wrong-token\n")
+        .output()
+        .unwrap();
+    let err = assert_error(&out, "login --web");
+    assert!(err.contains("with the token from the browser"), "{err}");
+    assert!(!env.session_path("default").exists());
+}
+
+/// Without a waiting login and without a previous handler the link is refused.
+#[test]
+fn link_handler_without_waiting_login() {
+    let env = Env::new();
+    let out = env
+        .pwk()
+        .args([
+            "auth",
+            "handler",
+            "open",
+            &format!("passwork://login?desktopToken={DESKTOP_TOKEN}"),
+        ])
+        .output()
+        .unwrap();
+    let err = assert_error(&out, "auth handler open");
+    assert!(
+        err.contains("no `pwk auth login --web` is waiting"),
+        "{err}"
+    );
+}
+
+/// A server with client-side encryption turned off answers 403 on the master key
+/// options; login, unlock and status take that as "no encryption".
+#[test]
+fn encryption_disabled_by_server() {
+    let env = Env::new();
+    env.server.disable_encryption();
+    let out = env
+        .pwk()
+        .args(["login", "--host", &env.server.url, "--access-token-stdin"])
+        .write_stdin(format!("{ACCESS_TOKEN}\n{REFRESH_TOKEN}\n"))
+        .output()
+        .unwrap();
+    assert_success(&out, "login");
+    assert!(
+        stderr(&out).contains("No unlock needed"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = env.pwk().args(["unlock"]).output().unwrap();
+    assert_success(&out, "unlock");
+    assert_eq!(stdout(&out), "", "nothing to eval");
+    assert!(
+        stderr(&out).contains("no unlock is needed"),
+        "{}",
+        stderr(&out)
+    );
+
+    let out = env.pwk().args(["status"]).output().unwrap();
+    assert_success(&out, "status");
+    let report = stdout_json(&out);
+    assert_eq!(report["encryption"], false, "{report}");
+    assert_eq!(report["locked"], false, "{report}");
 }

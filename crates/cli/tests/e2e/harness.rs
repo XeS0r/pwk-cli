@@ -89,7 +89,7 @@ impl Env {
         cmd
     }
 
-    /// `pwk [--profile P] login --host URL --access-token-stdin` with the access token
+    /// `pwk [--profile P] auth login --host URL --access-token-stdin` with the access token
     /// on the first stdin line and the refresh token on the second.
     pub fn login(&self, profile: Option<&str>) {
         let mut cmd = self.pwk();
@@ -97,21 +97,27 @@ impl Env {
             cmd.args(["--profile", p]);
         }
         let out = cmd
-            .args(["login", "--host", &self.server.url, "--access-token-stdin"])
+            .args([
+                "auth",
+                "login",
+                "--host",
+                &self.server.url,
+                "--access-token-stdin",
+            ])
             .write_stdin(format!("{ACCESS_TOKEN}\n{REFRESH_TOKEN}\n"))
             .output()
             .unwrap();
         assert_success(&out, "login");
     }
 
-    /// `pwk [--profile P] unlock --password-stdin --raw` → session key.
+    /// `pwk [--profile P] auth unlock --password-stdin --raw` → session key.
     pub fn unlock_raw(&self, profile: Option<&str>) -> String {
         let mut cmd = self.pwk();
         if let Some(p) = profile {
             cmd.args(["--profile", p]);
         }
         let out = cmd
-            .args(["unlock", "--password-stdin", "--raw"])
+            .args(["auth", "unlock", "--password-stdin", "--raw"])
             .write_stdin(format!("{MASTER_PASSWORD}\n"))
             .output()
             .unwrap();
@@ -171,12 +177,12 @@ pub fn assert_error(out: &Output, what: &str) -> String {
     err
 }
 
-/// Panics unless the command reported a locked session that points to `pwk unlock`.
+/// Panics unless the command reported a locked session that points to `pwk auth unlock`.
 pub fn assert_locked(out: &Output, what: &str) {
     let err = assert_error(out, what);
     assert!(
-        err.contains("pwk unlock"),
-        "`pwk {what}`: locked error should mention `pwk unlock`, got:\n{err}"
+        err.contains("pwk auth unlock"),
+        "`pwk {what}`: locked error should mention `pwk auth unlock`, got:\n{err}"
     );
     assert!(
         err.to_lowercase().contains("locked"),

@@ -39,11 +39,12 @@ pub fn run(ctx: &Context, cmd: &ShortcutCommand) -> anyhow::Result<ExitCode> {
                             r.location(&s.vault_id, s.folder_id.as_deref())?,
                         ),
                     ];
-                    let location = r
-                        .location(&item.vault_id, item.folder_id.as_deref())
+                    let vault = r.vault_name(&item.vault_id).unwrap_or_default();
+                    let path = r
+                        .folder_path(&item.vault_id, item.folder_id.as_deref())
                         .unwrap_or_default();
                     pairs.extend(
-                        item_pairs(item, &location, false)
+                        item_pairs(item, &vault, &path, false)
                             .into_iter()
                             .map(|(k, v)| (k, v.as_str().to_owned())),
                     );
@@ -133,12 +134,13 @@ fn print_rows(ctx: &Context, r: &Resolver<'_>, rows: &[ShortcutSummary]) -> anyh
     if ctx.format == Format::Json {
         return output::print_json(rows);
     }
-    let mut table = Table::new(["NAME", "PATH", "ITEM", "ID"]);
+    let mut table = Table::new(["NAME", "VAULT", "PATH", "ITEM", "ID"]);
     for row in rows {
         let s = &row.shortcut;
         table.push([
             shortcut_name(row),
-            r.location(&s.vault_id, s.folder_id.as_deref())?,
+            r.vault_name(&s.vault_id)?,
+            r.folder_path(&s.vault_id, s.folder_id.as_deref())?,
             s.item_id.clone(),
             s.id.clone(),
         ]);

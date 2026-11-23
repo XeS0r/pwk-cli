@@ -42,12 +42,12 @@ What `pwk` protects, and what it does not. The details are in
   directory 0700) holds the host and the **API token pair in plain text**, like `bw`
   keeps its session data. Anyone who can read it as you, or as root, can call the API as
   you until the tokens expire or are revoked in the web interface. Without client-side
-  encryption on the server, that is enough to read your passwords. `pwk logout` deletes
-  the file.
-- The **master key never lands on disk unsealed**. `pwk unlock` seals it with
+  encryption on the server, that is enough to read your passwords. `pwk auth logout`
+  deletes the file.
+- The **master key never lands on disk unsealed**. `pwk auth unlock` seals it with
   AES-256-GCM under a random 32-byte session key, bound to the profile and the expiry
   time; only the ciphertext is written to the session file.
-- Files that `pwk inject -o` and `pwk attachment get -o` write are created with
+- Files that `pwk inject -o` and `pwk item attachment get -o` write are created with
   mode 0600.
 
 ### In the environment
@@ -58,7 +58,7 @@ What `pwk` protects, and what it does not. The details are in
   protects against a copied file or a leaked variable, not against malware in your
   account.
 - An unlocked session expires after 12 hours by default (`unlock --timeout`,
-  `session_timeout`); `pwk lock` ends it at once by removing the sealed master key.
+  `session_timeout`); `pwk auth lock` ends it at once by removing the sealed master key.
 - `PASSWORK_MASTER_KEY` in CI is the derived master key itself. Treat it like the master
   password: a masked CI secret, never in logs or images.
 - Master password and tokens are read from the terminal without echo or from stdin,

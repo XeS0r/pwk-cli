@@ -144,7 +144,7 @@ impl Api {
         let profile = ctx.profile(config)?;
         let session = ctx.session(&profile)?;
         let Some(file) = session.load()? else {
-            anyhow::bail!("not logged in: run `pwk login`");
+            anyhow::bail!("not logged in: run `pwk auth login`");
         };
         let settings = config.profile(&profile);
         let client_config = client_config(&file.host, &settings)?;
@@ -260,7 +260,7 @@ impl Api {
             Some(pwk_api::Error::SessionExpired(_)) => match self.mode {
                 Mode::Stateless => error.context("set a fresh PASSWORK_TOKEN"),
                 Mode::Profile { .. } => {
-                    anyhow::anyhow!("{error:#}; run `pwk login` again")
+                    anyhow::anyhow!("{error:#}; run `pwk auth login` again")
                 }
             },
             _ => error,

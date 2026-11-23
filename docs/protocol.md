@@ -58,12 +58,35 @@ Token refresh (Passwork 7.6+):
   re-reads the file before refreshing.
 - Then retry the original request once.
 
-Other session endpoints: `GET /api/v1/sessions/current/info`.
+Other session endpoints: `GET /api/v1/sessions/current/info` describes the session
+(`authMethod`, expiry, 2FA state) but names no user; `GET /api/v1/users/info` returns
+the user (`login`, `fullName`, which may be `null`, `email`, role, permissions).
+
+Web sign-in of the desktop app **(unverified: read from the desktop app 1.4.2 and the
+web interface, not documented)**, used by `pwk auth login --web`:
+
+1. The browser opens `<host>/desktop?startDesktop=1`; the user signs in (and unlocks,
+   with client-side encryption).
+2. The web interface calls `POST /api/v1/auth-requests/desktop-application/create` →
+   `{"token"}` and opens `passwork://login?desktopToken=<token>`. The scheme is fixed in
+   the web interface.
+3. The receiver calls `POST /api/v1/auth-requests/login` **without** bearer, body
+   `{"token": "…"}` (the desktop app optionally adds `attributes`) →
+   `{"accessToken", "refreshToken", "accessTokenExpiredAt", …}`.
+
+Whether the server limits desktop sessions per user, and how long these tokens live, is
+not known. The link names no server, so a receiver cannot tell which host issued a
+token; `pwk` sends it to the host of the waiting `login --web`.
 
 ## Client-side encryption
 
 A server may run with or without client-side encryption. Without it every "encrypted"
 string is plain standard Base64 of the UTF-8 value, and no master key is needed.
+
+`GET /api/v1/app/settings` reports the mode in `isClientSideEncryptionEnabled` (the
+desktop app reads it there). With encryption turned off, `GET users/master-key/options`
+answers HTTP 403 ("Clientseitige Verschlüsselung deaktiviert"); `pwk` takes a 403 there
+as "no encryption" only if the settings confirm it.
 
 ### Master key
 
@@ -217,17 +240,17 @@ are RFC 6238.
 
 ## Endpoints
 
-| Purpose     | Request                                                                                                                                                                                                                         |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Vaults      | `GET /vaults`, `GET/POST/DELETE /vaults/{id}`, `POST /vaults` (create)                                                                                                                                                          |
-| Folders     | `GET /folders` **(filter `vaultId`, `parentId` unverified)**, `GET/POST/DELETE /folders/{id}`, `POST /folders` (create: `vaultId`, `parentId`, `name` unverified), `POST /folders/{id}/move` (`vaultId`, `parentId` unverified) |
-| Items       | `GET /items/search` (`query`, `tags[]`, `colorCodes[]`, `vaultIds[]`, `folderIds[]`) → `{"items"}`, `GET/PATCH/DELETE /items/{id}`, `POST /items`, `POST /items/{id}/move` **(body unverified: `vaultId`, `folderId`)**         |
-| Attachments | `GET /items/{id}/attachment/{attachmentId}`                                                                                                                                                                                     |
-| Snapshots   | `GET /items/{id}/snapshot/{snapshotId}` (no list endpoint known)                                                                                                                                                                |
-| Shortcuts   | `GET /shortcuts/search`, `GET/DELETE /shortcuts/{id}`, `POST /shortcuts`                                                                                                                                                        |
-| User        | `GET /users/keys`, `GET /users/master-key/options`                                                                                                                                                                              |
-| Sessions    | `POST /sessions/refresh`, `GET /sessions/current/info`                                                                                                                                                                          |
-| Misc        | `GET /app/features`, `GET /vault-types/all`, `POST /batch`                                                                                                                                                                      |
+| Purpose     | Request                                                                                                                                                                                                                                                                                                                                            |
+| ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Vaults      | `GET /vaults`, `GET/POST/DELETE /vaults/{id}`, `POST /vaults` (create)                                                                                                                                                                                                                                                                             |
+| Folders     | `GET /folders?vaultId=…[&parentFolderId=…]` (one level per call: the root, or the children of `parentFolderId`; `vaultId` is required), `GET/POST/DELETE /folders/{id}`, `POST /folders` (create: `vaultId`, `name`, `parentFolderId`), `POST /folders/{id}/move` (`targetVaultId`, `targetFolderId`). The parent of a folder is `parentFolderId`. |
+| Items       | `GET /items/search` (`query`, `tags[]`, `colorCodes[]`, `vaultIds[]`, `folderIds[]`) → `{"items"}`, `GET/PATCH/DELETE /items/{id}`, `POST /items`, `POST /items/{id}/move` **(body unverified: `vaultId`, `folderId`)**                                                                                                                            |
+| Attachments | `GET /items/{id}/attachment/{attachmentId}`                                                                                                                                                                                                                                                                                                        |
+| Snapshots   | `GET /items/{id}/snapshot/{snapshotId}` (no list endpoint known)                                                                                                                                                                                                                                                                                   |
+| Shortcuts   | `GET /shortcuts/search`, `GET/DELETE /shortcuts/{id}`, `POST /shortcuts`                                                                                                                                                                                                                                                                           |
+| User        | `GET /users/info`, `GET /users/keys`, `GET /users/master-key/options`                                                                                                                                                                                                                                                                              |
+| Sessions    | `POST /sessions/refresh`, `GET /sessions/current/info`, `POST /auth-requests/login` **(unverified)**                                                                                                                                                                                                                                               |
+| Misc        | `GET /app/features`, `GET /vault-types/all`, `POST /batch`                                                                                                                                                                                                                                                                                         |
 
 All paths are relative to `/api/v1`. Lists may come as a bare array or as
 `{"items": […]}`; the client accepts both.

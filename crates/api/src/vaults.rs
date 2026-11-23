@@ -3,7 +3,7 @@
 use serde_json::{Value, json};
 
 use crate::client::{KeyState, Query, from_value, id_from, list_values, object};
-use crate::models::{Feature, Folder, SessionInfo, Vault, VaultType};
+use crate::models::{BatchRequest, Feature, Folder, SessionInfo, UserInfo, Vault, VaultType};
 use crate::{Client, Error, Result, SecretString, endpoints};
 
 /// Name of the feature that makes vault types mandatory.
@@ -179,12 +179,48 @@ impl Client {
     ) -> Result<Vec<Folder>> {
         let mut q = Query::default();
         q.push_opt("vaultId", vault_id);
-        q.push_opt("parentId", parent_id);
+        q.push_opt("parentFolderId", parent_id);
         let v = self.get(endpoints::FOLDERS, &q)?;
-        list_values(v, endpoints::FOLDERS)?
-            .into_iter()
-            .map(|e| from_value(e, endpoints::FOLDERS))
-            .collect()
+        folders_from(v)
+    }
+
+    /// Every folder of a vault. `GET /folders` returns one level (the root, or the
+    /// children of `parentFolderId`), so the tree is read level by level, the children
+    /// of up to [`endpoints::BATCH_LIMIT`] folders per batch call.
+    pub fn list_all_folders(&self, vault_id: &str) -> Result<Vec<Folder>> {
+        let mut all = self.list_folders(Some(vault_id), None)?;
+        let mut level: Vec<String> = all.iter().map(|f| f.id.clone()).collect();
+        let mut seen: std::collections::HashSet<String> = level.iter().cloned().collect();
+        while !level.is_empty() {
+            let requests: Vec<BatchRequest> = level
+                .iter()
+                .map(|parent| {
+                    let query: String = url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("vaultId", vault_id)
+                        .append_pair("parentFolderId", parent)
+                        .finish();
+                    BatchRequest::get(&format!("{}?{query}", endpoints::FOLDERS))
+                })
+                .collect();
+            let mut next = Vec::new();
+            for response in self.batch(&requests)? {
+                if !(200..300).contains(&response.status_code) {
+                    return Err(Error::Response {
+                        path: endpoints::FOLDERS.into(),
+                        detail: format!("subfolder listing failed: HTTP {}", response.status_code),
+                    });
+                }
+                for folder in folders_from(response.body)? {
+                    // A cycle or a repeated folder must not loop forever.
+                    if seen.insert(folder.id.clone()) {
+                        next.push(folder.id.clone());
+                        all.push(folder);
+                    }
+                }
+            }
+            level = next;
+        }
+        Ok(all)
     }
 
     /// `GET /folders/{id}`.
@@ -193,14 +229,18 @@ impl Client {
         from_value(self.get(&path, &Query::default())?, &path)
     }
 
-    /// `POST /folders` `{vaultId, parentId, name}` **(body unverified)**; returns the ID.
+    /// `POST /folders` `{vaultId, name, parentFolderId}` (as the desktop app sends it);
+    /// returns the ID.
     pub fn create_folder(
         &self,
         vault_id: &str,
         parent_id: Option<&str>,
         name: &str,
     ) -> Result<String> {
-        let body = json!({ "vaultId": vault_id, "parentId": parent_id, "name": name });
+        let mut body = json!({ "vaultId": vault_id, "name": name });
+        if let Some(parent) = parent_id {
+            body["parentFolderId"] = json!(parent);
+        }
         let v = self.post(endpoints::FOLDERS, &body)?;
         id_from(&v, endpoints::FOLDERS)
     }
@@ -211,7 +251,8 @@ impl Client {
             .map(drop)
     }
 
-    /// `POST /folders/{id}/move` `{vaultId, parentId}` **(body unverified)**.
+    /// `POST /folders/{id}/move` `{targetVaultId, targetFolderId}` (as the desktop app
+    /// sends it).
     /// `parent_id = None` moves to the vault root.
     ///
     /// A move to another vault is [`Error::Invalid`] when either vault uses client-side
@@ -233,7 +274,11 @@ impl Client {
                 ));
             }
         }
-        let body = json!({ "vaultId": vault_id, "parentId": parent_id });
+        // Like `create_folder`: the parent key is left out for the vault root.
+        let mut body = json!({ "targetVaultId": vault_id });
+        if let Some(parent) = parent_id {
+            body["targetFolderId"] = json!(parent);
+        }
         self.post(&endpoints::folder_move(id)?, &body).map(drop)
     }
 
@@ -288,4 +333,18 @@ impl Client {
         let v = self.get(endpoints::SESSIONS_CURRENT_INFO, &Query::default())?;
         Ok(SessionInfo(v))
     }
+
+    /// `GET /users/info`: the signed-in user.
+    pub fn user_info(&self) -> Result<UserInfo> {
+        let v = self.get(endpoints::USERS_INFO, &Query::default())?;
+        Ok(UserInfo(v))
+    }
+}
+
+/// Folders of a `GET /folders` response.
+fn folders_from(v: Value) -> Result<Vec<Folder>> {
+    list_values(v, endpoints::FOLDERS)?
+        .into_iter()
+        .map(|e| from_value(e, endpoints::FOLDERS))
+        .collect()
 }

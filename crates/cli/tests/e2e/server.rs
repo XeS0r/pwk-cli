@@ -49,6 +49,8 @@ const FIXTURE_USER_KEYS: &str = include_str!("../../../api/tests/fixtures/user_k
 /// The token pair handed to `pwk login`.
 pub const ACCESS_TOKEN: &str = "access-0";
 pub const REFRESH_TOKEN: &str = "refresh-0";
+/// The one-time sign-in token the fake web interface hands out (`login --web`).
+pub const DESKTOP_TOKEN: &str = "desktop-token-1";
 
 pub const USER_ID: &str = "65f0000000000000000000e1";
 
@@ -225,6 +227,10 @@ struct State {
     refresh_token: String,
     /// The current access token answers 401 accessTokenExpired until refreshed.
     access_expired: bool,
+    /// Client-side encryption is turned off: `users/master-key/options` answers 403.
+    encryption_disabled: bool,
+    /// [`DESKTOP_TOKEN`] was exchanged already.
+    desktop_token_used: bool,
     rotations: u32,
     next_id: u32,
     vaults: Vec<Value>,
@@ -298,8 +304,8 @@ impl FakePasswork {
         }
 
         let folders = vec![
-            json!({ "id": FOLDER_DB, "name": "Datenbanken", "vaultId": VAULT_INFRA, "parentId": null }),
-            json!({ "id": FOLDER_PROD, "name": "Prod", "vaultId": VAULT_INFRA, "parentId": FOLDER_DB }),
+            json!({ "id": FOLDER_DB, "name": "Datenbanken", "vaultId": VAULT_INFRA, "parentFolderId": null }),
+            json!({ "id": FOLDER_PROD, "name": "Prod", "vaultId": VAULT_INFRA, "parentFolderId": FOLDER_DB }),
         ];
 
         let specs = [
@@ -442,6 +448,12 @@ impl FakePasswork {
         self.state().rotations
     }
 
+    /// Turns client-side encryption off, as a real server reports it: 403 on
+    /// `users/master-key/options`, `isClientSideEncryptionEnabled: false` in the settings.
+    pub fn disable_encryption(&self) {
+        self.state().encryption_disabled = true;
+    }
+
     /// From now on the current access token answers 401 `accessTokenExpired` until a
     /// refresh replaces it.
     pub fn expire_access_token(&self) {
@@ -465,6 +477,9 @@ impl FakePasswork {
 
         if req.method == "POST" && path == "sessions/refresh" {
             return self.refresh(req);
+        }
+        if req.method == "POST" && path == "auth-requests/login" {
+            return self.auth_request_login(req);
         }
         if let Some(denied) = self.check_auth(req) {
             return denied;
@@ -491,6 +506,25 @@ impl FakePasswork {
             ));
         }
         None
+    }
+
+    /// Exchanges [`DESKTOP_TOKEN`] (once) for the current token pair; no bearer.
+    fn auth_request_login(&self, req: &Request) -> Response {
+        let mut s = self.state();
+        if req.header("authorization").is_some() {
+            return Response::error(400, "unexpectedBearer", "no bearer expected");
+        }
+        if s.desktop_token_used || req.json()["token"].as_str() != Some(DESKTOP_TOKEN) {
+            return Response::error(401, "invalidAuthRequestToken", "invalid token");
+        }
+        s.desktop_token_used = true;
+        let now = now();
+        Response::ok(json!({
+            "accessToken": s.access_token,
+            "refreshToken": s.refresh_token,
+            "accessTokenExpiredAt": now + 3600,
+            "refreshTokenExpiredAt": now + 86_400,
+        }))
     }
 
     fn refresh(&self, req: &Request) -> Response {
@@ -550,14 +584,28 @@ impl FakePasswork {
     fn route(&self, req: &Request, path: &str) -> Response {
         let segments: Vec<&str> = path.split('/').collect();
         match (req.method.as_str(), segments.as_slice()) {
+            // As on a real server: the session info names no user, the user info does.
             ("GET", ["sessions", "current", "info"]) => Response::ok(json!({
-                "user": { "id": USER_ID, "name": "Test User", "login": "tester",
-                          "email": "tester@example.com" },
-                "sessionId": "s-1",
+                "id": "s-1", "authMethod": "apiToken", "isTransition": false,
+                "isTwoFactorAuthRequired": false,
+            })),
+            ("GET", ["users", "info"]) => Response::ok(json!({
+                "id": USER_ID, "login": "tester", "fullName": "Test User",
+                "email": "tester@example.com",
             })),
             ("GET", ["users", "master-key", "options"]) => {
+                if self.state().encryption_disabled {
+                    return Response::error(
+                        403,
+                        "clientSideEncryptionDisabled",
+                        "Clientseitige Verschlüsselung deaktiviert",
+                    );
+                }
                 Response::ok(json!({ "masterKeyOptions": self.master_key_options }))
             }
+            ("GET", ["app", "settings"]) => Response::ok(json!({
+                "isClientSideEncryptionEnabled": !self.state().encryption_disabled,
+            })),
             ("GET", ["users", "keys"]) => Response::ok(self.user_keys.clone()),
             ("GET", ["app", "features"]) => Response::ok(json!([])),
             ("GET", ["vault-types", "all"]) => Response::ok(json!({ "items": [] })),
@@ -580,15 +628,22 @@ impl FakePasswork {
             }
 
             // Folders
+            // As on a real server: vaultId is required and one level is listed, the
+            // root or the children of parentFolderId.
             ("GET", ["folders"]) => {
-                let vault = req.query_one("vaultId");
-                let parent = req.query_one("parentId");
+                let Some(vault) = req.query_one("vaultId") else {
+                    return Response::error(400, "invalid", "vaultId => Value must be provided");
+                };
+                let parent = req.query_one("parentFolderId");
                 let list: Vec<Value> = self
                     .state()
                     .folders
                     .iter()
-                    .filter(|f| vault.is_none_or(|v| f["vaultId"] == v))
-                    .filter(|f| parent.is_none_or(|p| f["parentId"] == p))
+                    .filter(|f| f["vaultId"] == vault)
+                    .filter(|f| match &parent {
+                        Some(p) => f["parentFolderId"] == *p,
+                        None => f["parentFolderId"].is_null(),
+                    })
                     .cloned()
                     .collect();
                 Response::ok(json!({ "items": list }))
@@ -605,7 +660,7 @@ impl FakePasswork {
                 let body = req.json();
                 self.state().folders.push(json!({
                     "id": id, "name": body["name"], "vaultId": body["vaultId"],
-                    "parentId": body["parentId"],
+                    "parentFolderId": body.get("parentFolderId").cloned().unwrap_or(Value::Null),
                 }));
                 Response::ok(json!({ "id": id }))
             }
@@ -615,8 +670,9 @@ impl FakePasswork {
                 let Some(folder) = s.folders.iter_mut().find(|f| f["id"] == *id) else {
                     return Response::not_found("folder");
                 };
-                folder["vaultId"] = body["vaultId"].clone();
-                folder["parentId"] = body["parentId"].clone();
+                folder["vaultId"] = body["targetVaultId"].clone();
+                folder["parentFolderId"] =
+                    body.get("targetFolderId").cloned().unwrap_or(Value::Null);
                 Response::ok(json!({ "id": id }))
             }
 
